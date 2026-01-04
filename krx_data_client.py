@@ -1173,6 +1173,68 @@ class KRXDataClient:
 
         return df[available] if available else df
 
+    @retry_on_session_expired()
+    def get_market_cap_by_ticker(self, date: str, market: str = "ALL") -> DataFrame:
+        """
+        특정일 전체 종목의 시가총액 조회 (pykrx 호환)
+
+        Args:
+            date: 조회일 (YYYYMMDD)
+            market: 시장구분 ("ALL", "KOSPI", "KOSDAQ", "KONEX")
+
+        Returns:
+            DataFrame: 종목코드 인덱스, 시가총액/거래량/거래대금/상장주식수 컬럼
+        """
+        market_map = {
+            "ALL": "ALL",
+            "KOSPI": "STK",
+            "KOSDAQ": "KSQ",
+            "KONEX": "KNX",
+        }
+        mkt_id = market_map.get(market.upper(), "ALL")
+
+        items = self._request(
+            self.BLD["fundamental_all"],
+            {
+                "mktId": mkt_id,
+                "trdDd": date,
+            }
+        )
+
+        if not items:
+            return DataFrame()
+
+        df = DataFrame(items)
+
+        # 컬럼 매핑 (pykrx 형식)
+        column_map = {
+            "ISU_SRT_CD": "티커",
+            "MKTCAP": "시가총액",
+            "ACC_TRDVOL": "거래량",
+            "ACC_TRDVAL": "거래대금",
+            "LIST_SHRS": "상장주식수",
+        }
+        df = df.rename(columns=column_map)
+
+        # 숫자 변환
+        numeric_cols = ["시가총액", "거래량", "거래대금", "상장주식수"]
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(
+                    df[col].astype(str).str.replace(",", ""),
+                    errors="coerce"
+                )
+
+        # 티커 인덱스
+        if "티커" in df.columns:
+            df = df.set_index("티커")
+
+        # 필요한 컬럼만 반환
+        result_cols = ["시가총액", "거래량", "거래대금", "상장주식수"]
+        available = [c for c in result_cols if c in df.columns]
+
+        return df[available] if available else df
+
     def get_market_ticker_list(self, date: Optional[str] = None, market: str = "KOSPI") -> List[str]:
         """
         티커 목록 조회 (pykrx 호환)
@@ -1490,6 +1552,11 @@ def get_market_ohlcv_by_date(fromdate: str, todate: str, ticker: str, adjusted: 
 def get_market_ohlcv_by_ticker(date: str, market: str = "ALL") -> DataFrame:
     """pykrx 호환: 특정일 전체 종목 OHLCV"""
     return _get_client().get_market_ohlcv_by_ticker(date, market)
+
+
+def get_market_cap_by_ticker(date: str, market: str = "ALL") -> DataFrame:
+    """pykrx 호환: 특정일 전체 종목 시가총액"""
+    return _get_client().get_market_cap_by_ticker(date, market)
 
 
 def get_market_cap_by_date(fromdate: str, todate: str, ticker: str) -> DataFrame:
