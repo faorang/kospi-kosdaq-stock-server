@@ -1,6 +1,6 @@
 [project]
 name = "kospi-kosdaq-stock-server"
-version = "0.3.0"
+version = "0.3.1"
 description = "KOSPI/KOSDAQ Stock Data MCP Server with KRX Data Marketplace integration"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -10,6 +10,7 @@ dependencies = [
     "mcp>=0.1.0",
     "playwright>=1.40.0",
     "nest-asyncio>=1.5.0",
+    "holidays>=0.40",
 ]
 
 authors = [

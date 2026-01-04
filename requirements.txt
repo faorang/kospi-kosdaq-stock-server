@@ -3,3 +3,4 @@ pandas>=1.5.0
 mcp>=0.1.0
 playwright>=1.40.0
 nest-asyncio>=1.5.0
+holidays>=0.40

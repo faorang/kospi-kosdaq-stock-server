@@ -29,10 +29,12 @@ import logging
 import asyncio
 import functools
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Callable, TypeVar
 from dataclasses import dataclass
+
+from holidays.countries import KR
 
 # MCP 서버 등 이미 이벤트 루프가 실행 중인 환경에서 중첩 실행 허용
 import nest_asyncio
@@ -1104,36 +1106,442 @@ class KRXDataClient:
         return df[available] if available else df
 
     # =========================================================================
+    # 전체 종목 조회 (pykrx 호환)
+    # =========================================================================
+
+    @retry_on_session_expired()
+    def get_market_ohlcv_by_ticker(self, date: str, market: str = "ALL") -> DataFrame:
+        """
+        특정일 전체 종목의 OHLCV 조회 (pykrx 호환)
+
+        Args:
+            date: 조회일 (YYYYMMDD)
+            market: 시장구분 ("ALL", "KOSPI", "KOSDAQ", "KONEX")
+
+        Returns:
+            DataFrame: 종목코드 인덱스, OHLCV 컬럼
+        """
+        market_map = {
+            "ALL": "ALL",
+            "KOSPI": "STK",
+            "KOSDAQ": "KSQ",
+            "KONEX": "KNX",
+        }
+        mkt_id = market_map.get(market.upper(), "ALL")
+
+        items = self._request(
+            "dbms/MDC/STAT/standard/MDCSTAT01501",
+            {
+                "mktId": mkt_id,
+                "trdDd": date,
+            }
+        )
+
+        if not items:
+            return DataFrame()
+
+        df = DataFrame(items)
+
+        # 컬럼 매핑
+        column_map = {
+            "ISU_SRT_CD": "티커",
+            "TDD_OPNPRC": "시가",
+            "TDD_HGPRC": "고가",
+            "TDD_LWPRC": "저가",
+            "TDD_CLSPRC": "종가",
+            "ACC_TRDVOL": "거래량",
+            "ACC_TRDVAL": "거래대금",
+        }
+        df = df.rename(columns=column_map)
+
+        # 숫자 변환
+        numeric_cols = ["시가", "고가", "저가", "종가", "거래량", "거래대금"]
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(
+                    df[col].astype(str).str.replace(",", ""),
+                    errors="coerce"
+                )
+
+        # 티커 인덱스
+        if "티커" in df.columns:
+            df = df.set_index("티커")
+
+        # 필요한 컬럼만 반환
+        result_cols = ["시가", "고가", "저가", "종가", "거래량", "거래대금"]
+        available = [c for c in result_cols if c in df.columns]
+
+        return df[available] if available else df
+
+    def get_market_ticker_list(self, date: Optional[str] = None, market: str = "KOSPI") -> List[str]:
+        """
+        티커 목록 조회 (pykrx 호환)
+
+        Args:
+            date: 조회일 (YYYYMMDD), None이면 최근 영업일
+            market: 시장구분 ("KOSPI", "KOSDAQ", "KONEX", "ALL")
+
+        Returns:
+            List[str]: 티커 코드 리스트
+        """
+        if date is None:
+            date = self.get_nearest_business_day()
+
+        tickers = self.get_market_ticker_name(date=date, market=market)
+        return list(tickers.keys())
+
+    @retry_on_session_expired()
+    def get_market_trading_value_by_investor(
+        self,
+        fromdate: str,
+        todate: str,
+        ticker: str,
+        detail: bool = False
+    ) -> DataFrame:
+        """
+        투자자별 거래대금 조회 (pykrx 호환)
+
+        Args:
+            fromdate: 시작일 (YYYYMMDD)
+            todate: 종료일 (YYYYMMDD)
+            ticker: 종목코드 (6자리)
+            detail: True면 12개 투자자, False면 5개 합산
+
+        Returns:
+            DataFrame: 날짜별 투자자별 순매수금액
+        """
+        isin = self._get_isin(ticker, todate)
+        if not isin:
+            raise KRXDataError(f"종목을 찾을 수 없습니다: {ticker}")
+
+        # detail 여부에 따라 다른 BLD 사용
+        bld = self.BLD["trading_volume_detail"] if detail else self.BLD["trading_volume"]
+
+        items = self._request(
+            bld,
+            {
+                "isuCd": isin,
+                "strtDd": fromdate,
+                "endDd": todate,
+            }
+        )
+
+        if not items:
+            return DataFrame()
+
+        df = DataFrame(items)
+
+        # 컬럼 매핑 - 거래대금(ASK_TRDVAL: 매도, BID_TRDVAL: 매수)
+        date_col = "TRD_DD"
+        if date_col not in df.columns:
+            return DataFrame()
+
+        # 순매수금액 계산 (매수 - 매도)
+        result_data = []
+        for _, row in df.iterrows():
+            row_dict = {"날짜": row[date_col]}
+
+            if detail:
+                # 상세 (12개 투자자)
+                investors = [
+                    ("금융투자", "TRDVAL1"),
+                    ("보험", "TRDVAL2"),
+                    ("투신", "TRDVAL3"),
+                    ("사모", "TRDVAL4"),
+                    ("은행", "TRDVAL5"),
+                    ("기타금융", "TRDVAL6"),
+                    ("연기금", "TRDVAL7"),
+                    ("기관합계", "TRDVAL_INST"),
+                    ("기타법인", "TRDVAL8"),
+                    ("개인", "TRDVAL9"),
+                    ("외국인", "TRDVAL10"),
+                    ("기타외국인", "TRDVAL11"),
+                ]
+            else:
+                # 합산 (5개 투자자)
+                investors = [
+                    ("기관합계", "TRDVAL_INST"),
+                    ("기타법인", "TRDVAL1"),
+                    ("개인", "TRDVAL2"),
+                    ("외국인합계", "TRDVAL3"),
+                    ("전체", "TRDVAL4"),
+                ]
+
+            for name, col_prefix in investors:
+                buy_col = f"BID_{col_prefix}" if f"BID_{col_prefix}" in row else col_prefix
+                sell_col = f"ASK_{col_prefix}" if f"ASK_{col_prefix}" in row else None
+
+                if buy_col in row:
+                    buy = pd.to_numeric(str(row.get(buy_col, 0)).replace(",", ""), errors="coerce") or 0
+                    sell = pd.to_numeric(str(row.get(sell_col, 0)).replace(",", ""), errors="coerce") or 0 if sell_col else 0
+                    row_dict[name] = buy - sell
+
+            result_data.append(row_dict)
+
+        result_df = DataFrame(result_data)
+
+        # 날짜 인덱스
+        if "날짜" in result_df.columns:
+            result_df["날짜"] = pd.to_datetime(result_df["날짜"], format="%Y/%m/%d")
+            result_df = result_df.set_index("날짜")
+            result_df.index.name = None
+            result_df = result_df.sort_index()
+
+        return result_df
+
+    @retry_on_session_expired()
+    def get_market_trading_value_by_date(
+        self,
+        fromdate: str,
+        todate: str,
+        ticker: str,
+        on: str = "순매수"
+    ) -> DataFrame:
+        """
+        일자별 거래대금 조회 (pykrx 호환)
+
+        Args:
+            fromdate: 시작일 (YYYYMMDD)
+            todate: 종료일 (YYYYMMDD)
+            ticker: 종목코드 (6자리)
+            on: "매도", "매수", "순매수" 중 하나
+
+        Returns:
+            DataFrame: 날짜별 거래대금
+        """
+        # 투자자별 거래대금 조회 후 집계
+        df = self.get_market_trading_value_by_investor(fromdate, todate, ticker)
+        return df
+
+    # =========================================================================
+    # pykrx 호환 별칭
+    # =========================================================================
+
+    def get_market_ohlcv_by_date(
+        self,
+        fromdate: str,
+        todate: str,
+        ticker: str,
+        adjusted: bool = True
+    ) -> DataFrame:
+        """pykrx 호환: get_market_ohlcv의 별칭"""
+        return self.get_market_ohlcv(fromdate, todate, ticker, adjusted)
+
+    def get_market_cap_by_date(
+        self,
+        fromdate: str,
+        todate: str,
+        ticker: str
+    ) -> DataFrame:
+        """pykrx 호환: get_market_cap의 별칭"""
+        return self.get_market_cap(fromdate, todate, ticker)
+
+    def get_market_fundamental_by_date(
+        self,
+        fromdate: str,
+        todate: str,
+        ticker: str
+    ) -> DataFrame:
+        """pykrx 호환: get_market_fundamental의 별칭"""
+        return self.get_market_fundamental(fromdate, todate, ticker)
+
+    def get_index_ohlcv_by_date(
+        self,
+        fromdate: str,
+        todate: str,
+        ticker: str,
+        freq: str = "d"
+    ) -> DataFrame:
+        """pykrx 호환: get_index_ohlcv의 별칭"""
+        return self.get_index_ohlcv(fromdate, todate, ticker, freq)
+
+    # =========================================================================
     # 유틸리티
     # =========================================================================
 
-    def get_nearest_business_day(self, date: Optional[str] = None) -> str:
+    def get_nearest_business_day(self, target_date: Optional[str] = None) -> str:
         """
-        가장 가까운 영업일 조회
+        가장 가까운 영업일 조회 (과거 방향으로 탐색)
 
         Args:
-            date: 기준일 (YYYYMMDD), None이면 오늘
+            target_date: 기준일 (YYYYMMDD), None이면 오늘
 
         Returns:
             영업일 (YYYYMMDD)
         """
-        if date:
-            dt = datetime.strptime(date, "%Y%m%d")
+        if target_date:
+            dt = datetime.strptime(target_date, "%Y%m%d").date()
         else:
-            dt = datetime.now()
+            dt = date.today()
 
-        # 주말이면 금요일로
-        weekday = dt.weekday()
-        if weekday == 5:  # 토요일
-            dt = dt - timedelta(days=1)
-        elif weekday == 6:  # 일요일
-            dt = dt - timedelta(days=2)
+        kr_holidays = KR()
+
+        # 최대 10일 전까지 탐색
+        for _ in range(10):
+            if self._is_market_day(dt, kr_holidays):
+                return dt.strftime("%Y%m%d")
+            dt -= timedelta(days=1)
 
         return dt.strftime("%Y%m%d")
+
+    def _is_market_day(self, dt: date, kr_holidays) -> bool:
+        """
+        한국 주식 시장 영업일 여부 확인
+
+        Args:
+            dt: 확인할 날짜
+            kr_holidays: 한국 공휴일 객체
+
+        Returns:
+            영업일이면 True
+        """
+        # 주말
+        if dt.weekday() >= 5:
+            return False
+
+        # 공휴일
+        if dt in kr_holidays:
+            return False
+
+        # 노동절 (5/1) - 증권시장 휴장
+        if dt.month == 5 and dt.day == 1:
+            return False
+
+        # 연말 (12/31) - 증권시장 휴장
+        if dt.month == 12 and dt.day == 31:
+            return False
+
+        # 연도별 특별 휴장일
+        if dt.year == 2025:
+            special_holidays = [
+                (1, 27),   # 설날 연휴 임시공휴일
+                (3, 3),    # 삼일절 대체공휴일
+                (5, 6),    # 어린이날/부처님오신날 대체공휴일
+                (6, 3),    # 대통령선거일
+                (10, 8),   # 추석 대체공휴일
+            ]
+            if (dt.month, dt.day) in special_holidays:
+                return False
+
+        return True
+
+    def is_market_day(self, target_date: Optional[str] = None) -> bool:
+        """
+        특정 날짜가 영업일인지 확인
+
+        Args:
+            target_date: 확인할 날짜 (YYYYMMDD), None이면 오늘
+
+        Returns:
+            영업일이면 True
+        """
+        if target_date:
+            dt = datetime.strptime(target_date, "%Y%m%d").date()
+        else:
+            dt = date.today()
+
+        return self._is_market_day(dt, KR())
 
     def close(self):
         """리소스 정리"""
         pass  # 현재는 특별히 정리할 것 없음
+
+    def get_nearest_business_day_in_a_week(
+        self,
+        target_date: Optional[str] = None,
+        prev: bool = True
+    ) -> str:
+        """
+        pykrx 호환: 일주일 내 가장 가까운 영업일 조회
+
+        Args:
+            target_date: 기준일 (YYYYMMDD), None이면 오늘
+            prev: True면 과거 방향, False면 미래 방향
+
+        Returns:
+            영업일 (YYYYMMDD)
+        """
+        # 현재는 과거 방향만 지원 (prev=True)
+        return self.get_nearest_business_day(target_date)
+
+
+# =============================================================================
+# 모듈 레벨 편의 객체 (pykrx 호환용)
+# =============================================================================
+
+# 싱글톤 클라이언트 (lazy initialization)
+_default_client: Optional[KRXDataClient] = None
+
+
+def _get_client() -> KRXDataClient:
+    """기본 클라이언트 반환 (lazy initialization)"""
+    global _default_client
+    if _default_client is None:
+        _default_client = KRXDataClient()
+    return _default_client
+
+
+# pykrx.stock.stock_api 호환 함수들
+def get_market_ohlcv_by_date(fromdate: str, todate: str, ticker: str, adjusted: bool = True) -> DataFrame:
+    """pykrx 호환: 개별종목 OHLCV"""
+    return _get_client().get_market_ohlcv_by_date(fromdate, todate, ticker, adjusted)
+
+
+def get_market_ohlcv_by_ticker(date: str, market: str = "ALL") -> DataFrame:
+    """pykrx 호환: 특정일 전체 종목 OHLCV"""
+    return _get_client().get_market_ohlcv_by_ticker(date, market)
+
+
+def get_market_cap_by_date(fromdate: str, todate: str, ticker: str) -> DataFrame:
+    """pykrx 호환: 시가총액"""
+    return _get_client().get_market_cap_by_date(fromdate, todate, ticker)
+
+
+def get_market_fundamental_by_date(fromdate: str, todate: str, ticker: str) -> DataFrame:
+    """pykrx 호환: 기본 지표"""
+    return _get_client().get_market_fundamental_by_date(fromdate, todate, ticker)
+
+
+def get_market_trading_volume_by_date(fromdate: str, todate: str, ticker: str, detail: bool = False) -> DataFrame:
+    """pykrx 호환: 투자자별 거래량"""
+    return _get_client().get_market_trading_volume_by_date(fromdate, todate, ticker, detail)
+
+
+def get_market_trading_value_by_date(fromdate: str, todate: str, ticker: str, on: str = "순매수") -> DataFrame:
+    """pykrx 호환: 일자별 거래대금"""
+    return _get_client().get_market_trading_value_by_date(fromdate, todate, ticker, on)
+
+
+def get_market_trading_volume_by_investor(fromdate: str, todate: str, ticker: str, detail: bool = False) -> DataFrame:
+    """pykrx 호환: 투자자별 거래량"""
+    return _get_client().get_market_trading_volume_by_date(fromdate, todate, ticker, detail)
+
+
+def get_market_trading_value_by_investor(fromdate: str, todate: str, ticker: str, detail: bool = False) -> DataFrame:
+    """pykrx 호환: 투자자별 거래대금"""
+    return _get_client().get_market_trading_value_by_investor(fromdate, todate, ticker, detail)
+
+
+def get_market_ticker_list(date: Optional[str] = None, market: str = "KOSPI") -> List[str]:
+    """pykrx 호환: 티커 목록"""
+    return _get_client().get_market_ticker_list(date, market)
+
+
+def get_market_ticker_name(ticker: str) -> str:
+    """pykrx 호환: 티커 이름"""
+    client = _get_client()
+    tickers = client.get_market_ticker_name(market="ALL")
+    return tickers.get(ticker, "")
+
+
+def get_index_ohlcv_by_date(fromdate: str, todate: str, ticker: str, freq: str = "d") -> DataFrame:
+    """pykrx 호환: 지수 OHLCV"""
+    return _get_client().get_index_ohlcv_by_date(fromdate, todate, ticker, freq)
+
+
+def get_nearest_business_day_in_a_week(target_date: Optional[str] = None, prev: bool = True) -> str:
+    """pykrx 호환: 일주일 내 가장 가까운 영업일"""
+    return _get_client().get_nearest_business_day_in_a_week(target_date, prev)
 
 
 # =============================================================================

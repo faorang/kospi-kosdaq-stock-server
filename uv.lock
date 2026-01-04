@@ -548,6 +548,18 @@ wheels = [
 ]
 
 [[package]]
+name = "holidays"
+version = "0.87"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "python-dateutil" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3e/fa/4464d560583ece7ae139ed8a3036bc0134b5cc0e7ebf86f0d19dbbc88855/holidays-0.87.tar.gz", hash = "sha256:e47d4e9c6b9c7afe331cc18f7fcf2026a38b4d701c9560a823d68a0306d8b3b3", size = 818962 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/62/51/597674c97d586c7f9ad003f41df8161a879184224558c05378a8d0f64fea/holidays-0.87-py3-none-any.whl", hash = "sha256:c6ced9bd1b19b1a386365e0caf857220d5d7a29f02e7bdfc2f38f27d64b10265", size = 1335850 },
+]
+
+[[package]]
 name = "httpcore"
 version = "1.0.9"
 source = { registry = "https://pypi.org/simple" }
@@ -742,6 +754,7 @@ name = "kospi-kosdaq-stock-server"
 version = "0.3.0"
 source = { editable = "." }
 dependencies = [
+    { name = "holidays" },
     { name = "mcp" },
     { name = "nest-asyncio" },
     { name = "pandas" },
@@ -760,6 +773,7 @@ legacy = [
 
 [package.metadata]
 requires-dist = [
+    { name = "holidays", specifier = ">=0.40" },
     { name = "mcp", specifier = ">=0.1.0" },
     { name = "nest-asyncio", specifier = ">=1.5.0" },
     { name = "pandas", specifier = ">=1.5.0" },
