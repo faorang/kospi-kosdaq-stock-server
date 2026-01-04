@@ -2,6 +2,17 @@
 .venv/
 dist/
 __pycache__/
+
+# Environment files
+.env
+.env.local
+
+# Session files
+.krx_session.json
+.krx_cookies.json
+
+# Log files
+*.log
 *.pyc
 *.pyo
 *.pyd

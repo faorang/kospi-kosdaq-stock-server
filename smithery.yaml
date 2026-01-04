@@ -3,10 +3,24 @@
 startCommand:
   type: stdio
   configSchema:
-    # JSON Schema defining the configuration options for the MCP.
     type: object
-    properties: {}
+    required:
+      - kakaoId
+      - kakaoPw
+    properties:
+      kakaoId:
+        type: string
+        description: "Kakao account ID for KRX Data Marketplace authentication"
+      kakaoPw:
+        type: string
+        description: "Kakao account password"
   commandFunction:
-    # A function that produces the CLI command to start the MCP on stdio.
     |-
-    () => ({ command: 'uvx', args: ['kospi_kosdaq_stock_server'] })
+    (config) => ({
+      command: 'uvx',
+      args: ['kospi_kosdaq_stock_server'],
+      env: {
+        KAKAO_ID: config.kakaoId,
+        KAKAO_PW: config.kakaoPw
+      }
+    })

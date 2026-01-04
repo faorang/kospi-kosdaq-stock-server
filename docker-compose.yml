@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  kospi-kosdaq-mcp:
+    build: .
+    container_name: kospi-kosdaq-mcp-server
+    environment:
+      - PYTHONUNBUFFERED=1
+      - KAKAO_ID=${KAKAO_ID}
+      - KAKAO_PW=${KAKAO_PW}
+    volumes:
+      # Persist session cookies across restarts
+      - krx-session:/home/app
+    restart: unless-stopped
+    # For STDIO mode, use stdin_open and tty
+    stdin_open: true
+    tty: true
+
+volumes:
+  krx-session:
+    driver: local

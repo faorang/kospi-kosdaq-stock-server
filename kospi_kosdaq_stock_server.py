@@ -1,27 +1,123 @@
+"""
+KOSPI/KOSDAQ Stock Data MCP Server v2
+
+데이터 소스:
+- KRX Data Marketplace (data.krx.co.kr): 모든 데이터 (카카오 로그인 필요)
+- pykrx: 폴백용 (선택사항)
+
+환경변수:
+    KAKAO_ID: 카카오 아이디
+    KAKAO_PW: 카카오 비밀번호
+"""
+
 import json
 import logging
+import os
 from datetime import datetime
-from typing import Dict, Any, Union
+from typing import Dict, Any, Union, Optional
 
 from mcp.server.fastmcp import FastMCP
-from pykrx.stock.stock_api import get_market_ohlcv, get_nearest_business_day_in_a_week, get_market_cap, \
-    get_market_fundamental_by_date, get_market_trading_volume_by_date, get_index_ohlcv_by_date
-from pykrx.website.krx.market.wrap import get_market_ticker_and_name
 
-# Configure logging
+# Configure logging to file (STDIO 모드에서 stderr 출력 방지)
+LOG_FILE = os.path.expanduser("~/.kospi_kosdaq_mcp.log")
 logging.basicConfig(
     level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding='utf-8'),
+    ]
 )
+logger = logging.getLogger(__name__)
+logger.info(f"MCP Server 시작, 로그 파일: {LOG_FILE}")
 
-# Create MCP server (add pykrx dependency)
+# Create MCP server
 mcp = FastMCP(
     "kospi-kosdaq-stock-server",
-    dependencies=["pykrx"]
+    dependencies=["requests", "pandas", "playwright"]
 )
+
+# Global clients (lazy initialization)
+_krx_client = None
+_use_pykrx_fallback = True  # pykrx 폴백 사용 여부
 
 # Global variable to store ticker information in memory
 TICKER_MAP: Dict[str, str] = {}
+
+
+def _get_krx_client():
+    """KRX Data Client 가져오기 (lazy init)"""
+    global _krx_client
+    if _krx_client is None:
+        try:
+            from krx_data_client import KRXDataClient
+            _krx_client = KRXDataClient(headless=True, auto_login=True)
+            logger.info("KRX Data Client 초기화 완료")
+        except Exception as e:
+            logger.warning(f"KRX Data Client 초기화 실패: {e}")
+            return None
+    return _krx_client
+
+
+def _use_pykrx():
+    """pykrx 사용 가능 여부 확인"""
+    if not _use_pykrx_fallback:
+        return False
+    try:
+        import pykrx
+        return True
+    except ImportError:
+        return False
+
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+def validate_date(date_str: Union[str, int]) -> str:
+    """날짜 형식 검증 및 변환"""
+    try:
+        if isinstance(date_str, int):
+            date_str = str(date_str)
+        if '-' in date_str:
+            parsed_date = datetime.strptime(date_str, '%Y-%m-%d')
+            return parsed_date.strftime('%Y%m%d')
+        datetime.strptime(date_str, '%Y%m%d')
+        return date_str
+    except ValueError:
+        raise ValueError(f"Date must be in YYYYMMDD format. Input value: {date_str}")
+
+
+def validate_ticker(ticker_str: Union[str, int]) -> str:
+    """티커 형식 검증"""
+    if isinstance(ticker_str, int):
+        return str(ticker_str).zfill(6)
+    return ticker_str.zfill(6)
+
+
+def df_to_dict_with_date_index(df, reverse: bool = True) -> Dict[str, Any]:
+    """DataFrame을 날짜 키 딕셔너리로 변환"""
+    if df is None or df.empty:
+        return {}
+
+    result = df.to_dict(orient='index')
+
+    # datetime 인덱스를 문자열로 변환
+    formatted = {}
+    for k, v in result.items():
+        if hasattr(k, 'strftime'):
+            key = k.strftime('%Y-%m-%d')
+        else:
+            key = str(k)
+        formatted[key] = v
+
+    # 정렬
+    sorted_items = sorted(formatted.items(), reverse=reverse)
+    return dict(sorted_items)
+
+
+# =============================================================================
+# MCP Tools
+# =============================================================================
 
 @mcp.tool()
 def load_all_tickers() -> Dict[str, str]:
@@ -31,53 +127,398 @@ def load_all_tickers() -> Dict[str, str]:
         Dict[str, str]: A dictionary mapping tickers to stock names.
         Example: {"005930": "삼성전자", "035720": "카카오", ...}
     """
-    try:
-        global TICKER_MAP
+    global TICKER_MAP
 
-        # If TICKER_MAP already has data, return it
-        if TICKER_MAP:
-            logging.debug(f"Returning cached ticker information with {len(TICKER_MAP)} stocks")
+    # 캐시된 데이터가 있으면 반환
+    if TICKER_MAP:
+        logger.debug(f"Returning cached ticker information with {len(TICKER_MAP)} stocks")
+        return TICKER_MAP
+
+    try:
+        # 1. KRX Data Client 시도
+        client = _get_krx_client()
+        if client:
+            try:
+                ticker_map = client.get_market_ticker_name(market="ALL")
+                if ticker_map:
+                    TICKER_MAP.update(ticker_map)
+                    logger.info(f"KRX Data Client로 {len(TICKER_MAP)}개 종목 로드")
+                    return TICKER_MAP
+            except Exception as e:
+                logger.warning(f"KRX Data Client 실패: {e}")
+
+        # 2. pykrx 폴백
+        if _use_pykrx():
+            logger.info("pykrx로 폴백합니다...")
+            from pykrx.stock.stock_api import get_nearest_business_day_in_a_week
+            from pykrx.website.krx.market.wrap import get_market_ticker_and_name
+
+            today = get_nearest_business_day_in_a_week()
+            kospi_series = get_market_ticker_and_name(today, market="KOSPI")
+            kosdaq_series = get_market_ticker_and_name(today, market="KOSDAQ")
+
+            TICKER_MAP.update(kospi_series.to_dict())
+            TICKER_MAP.update(kosdaq_series.to_dict())
+
+            logger.info(f"pykrx로 {len(TICKER_MAP)}개 종목 로드")
             return TICKER_MAP
 
-        logging.debug("No cached data found. Loading KOSPI/KOSDAQ ticker symbols")
-
-        # Retrieve data based on today's date
-        today = get_nearest_business_day_in_a_week()
-        logging.debug(f"Reference date: {today}")
-
-        # get_market_ticker_and_name() returns a Series,
-        # where the index is the ticker and the values are the stock names
-        kospi_series = get_market_ticker_and_name(today, market="KOSPI")
-        kosdaq_series = get_market_ticker_and_name(today, market="KOSDAQ")
-
-        # Convert Series to dictionaries and merge them
-        TICKER_MAP.update(kospi_series.to_dict())
-        TICKER_MAP.update(kosdaq_series.to_dict())
-
-        logging.debug(f"Successfully stored information for {len(TICKER_MAP)} stocks")
-        return TICKER_MAP
+        return {"error": "데이터 소스가 없습니다. 환경변수를 확인하세요."}
 
     except Exception as e:
         error_message = f"Failed to retrieve ticker information: {str(e)}"
-        logging.error(error_message)
+        logger.error(error_message)
         return {"error": error_message}
+
 
 @mcp.resource("stock://tickers")
 def get_ticker_map() -> str:
     """Retrieves the stored ticker symbol-name mapping information."""
     try:
         if not TICKER_MAP:
-            return json.dumps({"message": "No ticker information stored. Please run the load_all_tickers() tool first to load ticker information."})
-
-        # Return formatted for better readability
-        # result = ["[Ticker Symbol - Stock Name Mapping]"]
-        # for ticker, name in TICKER_MAP.items():
-        #     result.append(f"- {ticker}: {name}")
-        # return "\n".join(result)
+            return json.dumps({
+                "message": "No ticker information stored. "
+                           "Please run the load_all_tickers() tool first."
+            })
         return json.dumps(TICKER_MAP)
+    except Exception as e:
+        return json.dumps({"error": f"Failed to retrieve ticker information: {str(e)}"})
+
+
+@mcp.tool()
+def get_stock_ohlcv(
+    fromdate: Union[str, int],
+    todate: Union[str, int],
+    ticker: Union[str, int],
+    adjusted: bool = True
+) -> Dict[str, Any]:
+    """Retrieves OHLCV (Open/High/Low/Close/Volume) data for a specific stock.
+
+    Args:
+        fromdate (str): Start date for retrieval (YYYYMMDD)
+        todate   (str): End date for retrieval (YYYYMMDD)
+        ticker   (str): Stock ticker symbol
+        adjusted (bool, optional): Whether to use adjusted prices. Defaults to True.
+
+    Returns:
+        Dict with date keys containing OHLCV data.
+        Columns: Open, High, Low, Close, Volume, Amount, MarketCap
+    """
+    try:
+        fromdate = validate_date(fromdate)
+        todate = validate_date(todate)
+        ticker = validate_ticker(ticker)
+
+        logger.debug(f"Retrieving stock OHLCV: {ticker}, {fromdate}-{todate}")
+
+        # 1. KRX Data Client 시도
+        client = _get_krx_client()
+        if client:
+            try:
+                df = client.get_market_ohlcv(fromdate, todate, ticker, adjusted=adjusted)
+                if not df.empty:
+                    logger.info("KRX Data Client로 OHLCV 데이터 조회 성공")
+                    return df_to_dict_with_date_index(df)
+            except Exception as e:
+                logger.warning(f"KRX Data Client 실패: {e}")
+
+        # 2. pykrx 폴백
+        if _use_pykrx():
+            logger.info("pykrx로 폴백합니다...")
+            from pykrx.stock.stock_api import get_market_ohlcv
+            df = get_market_ohlcv(fromdate, todate, ticker, adjusted=adjusted)
+            return df_to_dict_with_date_index(df)
+
+        return {"error": "데이터 소스가 없습니다."}
 
     except Exception as e:
-      return json.dumps({"error": f"Failed to retrieve ticker information: {str(e)}"})
+        error_message = f"Data retrieval failed: {str(e)}"
+        logger.error(error_message)
+        return {"error": error_message}
+
+
+@mcp.tool()
+def get_stock_market_cap(
+    fromdate: Union[str, int],
+    todate: Union[str, int],
+    ticker: Union[str, int]
+) -> Dict[str, Any]:
+    """Retrieves market capitalization data for a specific stock.
+
+    Args:
+        fromdate (str): Start date for retrieval (YYYYMMDD)
+        todate   (str): End date for retrieval (YYYYMMDD)
+        ticker   (str): Stock ticker symbol
+
+    Returns:
+        Dict with date keys containing MarketCap, Volume, Amount.
+    """
+    try:
+        fromdate = validate_date(fromdate)
+        todate = validate_date(todate)
+        ticker = validate_ticker(ticker)
+
+        logger.debug(f"Retrieving market cap: {ticker}, {fromdate}-{todate}")
+
+        # 1. KRX Data Client 시도
+        client = _get_krx_client()
+        if client:
+            try:
+                df = client.get_market_cap(fromdate, todate, ticker)
+                if not df.empty:
+                    logger.info("KRX Data Client로 시가총액 데이터 조회 성공")
+                    return df_to_dict_with_date_index(df)
+            except Exception as e:
+                logger.warning(f"KRX Data Client 실패: {e}")
+
+        # 2. pykrx 폴백
+        if _use_pykrx():
+            logger.info("pykrx로 폴백합니다...")
+            from pykrx.stock.stock_api import get_market_cap
+            df = get_market_cap(fromdate, todate, ticker)
+            return df_to_dict_with_date_index(df)
+
+        return {"error": "데이터 소스가 없습니다."}
+
+    except Exception as e:
+        error_message = f"Data retrieval failed: {str(e)}"
+        logger.error(error_message)
+        return {"error": error_message}
+
+
+@mcp.tool()
+def get_stock_fundamental(
+    fromdate: Union[str, int],
+    todate: Union[str, int],
+    ticker: Union[str, int]
+) -> Dict[str, Any]:
+    """Retrieves fundamental data (PER/PBR/Dividend Yield) for a specific stock.
+
+    Args:
+        fromdate (str): Start date for retrieval (YYYYMMDD)
+        todate   (str): End date for retrieval (YYYYMMDD)
+        ticker   (str): Stock ticker symbol
+
+    Returns:
+        Dict with date keys containing BPS, PER, PBR, EPS, DIV, DPS.
+    """
+    try:
+        fromdate = validate_date(fromdate)
+        todate = validate_date(todate)
+        ticker = validate_ticker(ticker)
+
+        logger.debug(f"Retrieving fundamental: {ticker}, {fromdate}-{todate}")
+
+        # 1. KRX Data Client 시도 (기간 조회 지원)
+        client = _get_krx_client()
+        if client:
+            try:
+                df = client.get_market_fundamental(fromdate, todate, ticker)
+                if not df.empty:
+                    logger.info("KRX Data Client로 fundamental 데이터 조회 성공")
+                    return df_to_dict_with_date_index(df)
+            except Exception as e:
+                logger.warning(f"KRX Data Client 실패: {e}")
+
+        # 2. pykrx 폴백
+        if _use_pykrx():
+            logger.info("pykrx로 폴백합니다...")
+            from pykrx.stock.stock_api import get_market_fundamental_by_date
+            df = get_market_fundamental_by_date(fromdate, todate, ticker)
+            return df_to_dict_with_date_index(df)
+
+        return {"error": "데이터 소스가 없습니다. KAKAO_ID, KAKAO_PW 환경변수를 확인하세요."}
+
+    except Exception as e:
+        error_message = f"Data retrieval failed: {str(e)}"
+        logger.error(error_message)
+        return {"error": error_message}
+
+
+@mcp.tool()
+def get_stock_trading_volume(
+    fromdate: Union[str, int],
+    todate: Union[str, int],
+    ticker: Union[str, int],
+    detail: bool = False
+) -> Dict[str, Any]:
+    """Retrieves trading volume by investor type for a specific stock.
+
+    Args:
+        fromdate (str): Start date for retrieval (YYYYMMDD)
+        todate   (str): End date for retrieval (YYYYMMDD)
+        ticker   (str): Stock ticker symbol
+        detail   (bool): If True, returns 12 investor types. If False, returns 5 types.
+                        False: 기관합계, 기타법인, 개인, 외국인합계, 전체
+                        True: 금융투자, 보험, 투신, 사모, 은행, 기타금융, 연기금, 기타법인, 개인, 외국인, 기타외국인, 전체
+
+    Returns:
+        Dict with date keys containing investor type net trading volumes.
+    """
+    try:
+        fromdate = validate_date(fromdate)
+        todate = validate_date(todate)
+        ticker = validate_ticker(ticker)
+
+        logger.debug(f"Retrieving trading volume: {ticker}, {fromdate}-{todate}, detail={detail}")
+
+        # 1. KRX Data Client 시도
+        client = _get_krx_client()
+        if client:
+            try:
+                df = client.get_market_trading_volume_by_date(fromdate, todate, ticker, detail=detail)
+                if not df.empty:
+                    logger.info("KRX Data Client로 투자자별 거래량 조회 성공")
+                    return df_to_dict_with_date_index(df)
+            except Exception as e:
+                logger.warning(f"KRX Data Client 실패: {e}")
+
+        # 2. pykrx 폴백
+        if _use_pykrx():
+            logger.info("pykrx로 폴백합니다...")
+            from pykrx.stock.stock_api import get_market_trading_volume_by_date
+            df = get_market_trading_volume_by_date(fromdate, todate, ticker)
+            return df_to_dict_with_date_index(df)
+
+        return {"error": "데이터 소스가 없습니다. KAKAO_ID, KAKAO_PW 환경변수를 확인하세요."}
+
+    except Exception as e:
+        error_message = f"Data retrieval failed: {str(e)}"
+        logger.error(error_message)
+        return {"error": error_message}
+
+
+@mcp.tool()
+def get_index_ohlcv(
+    fromdate: Union[str, int],
+    todate: Union[str, int],
+    ticker: Union[str, int],
+    freq: str = 'd'
+) -> Dict[str, Any]:
+    """Retrieves OHLCV data for a specific index.
+
+    Args:
+        fromdate (str): Start date for retrieval (YYYYMMDD)
+        todate   (str): End date for retrieval (YYYYMMDD)
+        ticker   (str): Index ticker (1001 for KOSPI, 2001 for KOSDAQ)
+        freq     (str): d - daily / m - monthly / y - yearly. Defaults to 'd'.
+
+    Returns:
+        Dict with date keys containing index OHLCV data.
+        Columns: Open, High, Low, Close, Volume, Amount
+    """
+    def validate_freq(freq_str: str) -> str:
+        valid_freqs = ['d', 'm', 'y']
+        if freq_str not in valid_freqs:
+            raise ValueError(f"Frequency must be one of {valid_freqs}.")
+        return freq_str
+
+    try:
+        fromdate = validate_date(fromdate)
+        todate = validate_date(todate)
+        ticker = str(ticker)  # 지수는 문자열로
+        freq = validate_freq(freq)
+
+        logger.debug(f"Retrieving index OHLCV: {ticker}, {fromdate}-{todate}, freq={freq}")
+
+        # 1. KRX Data Client 시도
+        client = _get_krx_client()
+        if client:
+            try:
+                df = client.get_index_ohlcv(fromdate, todate, ticker, freq=freq)
+                if not df.empty:
+                    logger.info("KRX Data Client로 지수 OHLCV 조회 성공")
+                    return df_to_dict_with_date_index(df)
+            except Exception as e:
+                logger.warning(f"KRX Data Client 실패: {e}")
+
+        # 2. pykrx 폴백
+        if _use_pykrx():
+            logger.info("pykrx로 폴백합니다...")
+            from pykrx.stock.stock_api import get_index_ohlcv_by_date
+            df = get_index_ohlcv_by_date(fromdate, todate, ticker, freq=freq, name_display=False)
+            return df_to_dict_with_date_index(df)
+
+        return {"error": "지수 데이터 소스가 없습니다."}
+
+    except Exception as e:
+        error_message = f"Data retrieval failed: {str(e)}"
+        logger.error(error_message)
+        return {"error": error_message}
+
+
+# =============================================================================
+# Resources
+# =============================================================================
+
+@mcp.resource("stock://format-guide")
+def get_format_guide() -> str:
+    """Provides a guide for date format and ticker symbol input."""
+    return """
+    [Input Format Guide]
+    1. Ticker symbol: 6-digit number (e.g., 005930 - Samsung Electronics)
+    2. Date format: YYYYMMDD (e.g., 20240301) or YYYY-MM-DD (e.g., 2024-03-01)
+
+    [Notes]
+    - The start date must be earlier than the end date.
+    - For adjusted=True, adjusted prices are retrieved.
+    """
+
+
+@mcp.resource("stock://popular-tickers")
+def get_popular_tickers() -> str:
+    """Provides a list of frequently queried ticker symbols."""
+    return """
+    [Frequently Queried Ticker Symbols]
+    - 005930: 삼성전자
+    - 000660: SK하이닉스
+    - 373220: LG에너지솔루션
+    - 035420: NAVER
+    - 035720: 카카오
+    """
+
+
+@mcp.resource("stock://data-sources")
+def get_data_sources() -> str:
+    """현재 사용 중인 데이터 소스 정보"""
+    sources = []
+
+    # KRX Data Client
+    client = _get_krx_client()
+    if client:
+        sources.append("- KRX Data Client: 활성화 (OHLCV, 시가총액, PER/PBR, 투자자별 거래량, 지수)")
+    else:
+        sources.append("- KRX Data Client: 비활성화 (KAKAO_ID, KAKAO_PW 환경변수 필요)")
+
+    # pykrx
+    if _use_pykrx():
+        sources.append("- pykrx: 폴백으로 사용 가능")
+    else:
+        sources.append("- pykrx: 비활성화")
+
+    return "\n".join(["[Data Sources]"] + sources)
+
+
+@mcp.resource("stock://index-tickers")
+def get_index_tickers() -> str:
+    """지수 티커 목록"""
+    return """
+    [Index Tickers]
+    KOSPI 계열:
+    - 1001: 코스피
+    - 1028: KOSPI 200
+    - 1034: KOSPI 100
+    - 1035: KOSPI 50
+
+    KOSDAQ 계열:
+    - 2001: 코스닥
+    - 2203: KOSDAQ 150
+    """
+
+
+# =============================================================================
+# Prompts
+# =============================================================================
 
 @mcp.prompt()
 def search_stock_data_prompt() -> str:
@@ -89,7 +530,7 @@ def search_stock_data_prompt() -> str:
        load_all_tickers()
 
     2. Check the code of the desired stock from the loaded ticker information:
-       Refer to the stock://tickers resource to find the ticker corresponding to the stock name.
+       Refer to the stock://tickers resource.
 
     3. Retrieve the desired data using the found ticker:
 
@@ -103,122 +544,21 @@ def search_stock_data_prompt() -> str:
        get_stock_fundamental("start_date", "end_date", "ticker")
 
        Retrieve trading volume by investor type:
-       get_stock_trading_volume("start_date", "end_date", "ticker")
+       get_stock_trading_volume("start_date", "end_date", "ticker", detail=False)
+       - detail=False: 5 investor types (기관합계, 기타법인, 개인, 외국인합계, 전체)
+       - detail=True: 12 investor types (금융투자, 보험, 투신, 사모, 은행, 기타금융, 연기금, 기타법인, 개인, 외국인, 기타외국인, 전체)
 
        Retrieve index OHLCV data (KOSPI, KOSDAQ, etc.):
        get_index_ohlcv("start_date", "end_date", "ticker", freq="d")
        - ticker: 1001 for KOSPI, 2001 for KOSDAQ
        - freq: "d" for daily, "m" for monthly, "y" for yearly
 
-    Example) To retrieve data for Samsung Electronics in January 2024:
-    1. load_all_tickers()  # Load all tickers
-    2. Refer to stock://tickers  # Check Samsung Electronics = 005930
-    3. get_stock_ohlcv("20240101", "20240131", "005930")  # Retrieve OHLCV data
-       or
-       get_stock_market_cap("20240101", "20240131", "005930")  # Retrieve market cap data
-       or
-       get_stock_fundamental("20240101", "20240131", "005930")  # Retrieve fundamental data
-       or
-       get_stock_trading_volume("20240101", "20240131", "005930")  # Retrieve trading volume
-
-    Example) To retrieve KOSPI index data for January 2021:
-       get_index_ohlcv("20210101", "20210131", "1001", freq="d")  # Daily KOSPI data
+    Example) To retrieve data for Samsung Electronics in December 2025:
+    1. load_all_tickers()
+    2. Refer to stock://tickers  # Samsung = 005930
+    3. get_stock_ohlcv("20251201", "20251220", "005930")
     """
 
-@mcp.tool()
-def get_stock_ohlcv(fromdate: Union[str, int], todate: Union[str, int], ticker: Union[str, int], adjusted: bool = True) -> Dict[str, Any]:
-    """Retrieves OHLCV (Open/High/Low/Close/Volume) data for a specific stock.
-
-    Args:
-        fromdate (str): Start date for retrieval (YYYYMMDD)
-        todate   (str): End date for retrieval (YYYYMMDD)
-        ticker   (str): Stock ticker symbol
-        adjusted (bool, optional): Whether to use adjusted prices (True: adjusted, False: unadjusted). Defaults to True.
-
-    Returns:
-        DataFrame:
-            >> get_stock_ohlcv("20210118", "20210126", "005930")
-                            Open     High     Low    Close   Volume
-            Date
-            2021-01-26  89500  94800  89500  93800  46415214
-            2021-01-25  87300  89400  86800  88700  25577517
-            2021-01-22  89000  89700  86800  86800  30861661
-            2021-01-21  87500  88600  86500  88100  25318011
-            2021-01-20  89000  89000  86500  87200  25211127
-            2021-01-19  84500  88000  83600  87000  39895044
-            2021-01-18  86600  87300  84100  85000  43227951
-    """
-    # Validate and convert date format
-    def validate_date(date_str: Union[str, int]) -> str:
-        try:
-            if isinstance(date_str, int):
-                date_str = str(date_str)
-            # Convert if in YYYY-MM-DD format
-            if '-' in date_str:
-                parsed_date = datetime.strptime(date_str, '%Y-%m-%d')
-                return parsed_date.strftime('%Y%m%d')
-            # Validate if in YYYYMMDD format
-            datetime.strptime(date_str, '%Y%m%d')
-            return date_str
-        except ValueError:
-            raise ValueError(f"Date must be in YYYYMMDD format. Input value: {date_str}")
-
-    def validate_ticker(ticker_str: Union[str, int]) -> str:
-        if isinstance(ticker_str, int):
-            return str(ticker_str)
-        return ticker_str
-
-    try:
-        fromdate = validate_date(fromdate)
-        todate = validate_date(todate)
-        ticker = validate_ticker(ticker)
-
-        logging.debug(f"Retrieving stock OHLCV data: {ticker}, {fromdate}-{todate}, adjusted={adjusted}")
-
-        # Call get_market_ohlcv (changed adj -> adjusted)
-        df = get_market_ohlcv(fromdate, todate, ticker, adjusted=adjusted)
-
-        # Convert DataFrame to dictionary
-        result = df.to_dict(orient='index')
-
-        # Convert datetime index to string and sort in reverse
-        sorted_items = sorted(
-            ((k.strftime('%Y-%m-%d'), v) for k, v in result.items()),
-            reverse=True
-        )
-        result = dict(sorted_items)
-
-        return result
-
-    except Exception as e:
-        error_message = f"Data retrieval failed: {str(e)}"
-        logging.error(error_message)
-        return {"error": error_message}
-
-@mcp.resource("stock://format-guide")
-def get_format_guide() -> str:
-    """Provides a guide for date format and ticker symbol input."""
-    return """
-    [Input Format Guide]
-    1. Ticker symbol: 6-digit number (e.g., 005930 - Samsung Electronics)
-    2. Date format: YYYYMMDD (e.g., 20240301) or YYYY-MM-DD (e.g., 2024-03-01)
-
-    [Notes]
-    - The start date must be earlier than the end date.
-    - If adjusted=True, adjusted prices are retrieved; if False, unadjusted prices are retrieved.
-    """
-
-@mcp.resource("stock://popular-tickers")
-def get_popular_tickers() -> str:
-    """Provides a list of frequently queried ticker symbols."""
-    return """
-    [Frequently Queried Ticker Symbols]
-    - 005930: 삼성전자
-    - 000660: SK하이닉스
-    - 373220: LG에너지솔루션
-    - 035420: NAVER
-    - 035720: 카카오
-    """
 
 @mcp.prompt()
 def get_stock_data_prompt() -> str:
@@ -233,275 +573,6 @@ def get_stock_data_prompt() -> str:
 
     Example) get_stock_ohlcv("20240101", "20240301", "005930", adjusted=True)
     """
-
-@mcp.tool()
-def get_stock_market_cap(fromdate: Union[str, int], todate: Union[str, int], ticker: Union[str, int]) -> Dict[str, Any]:
-    """Retrieves market capitalization data for a specific stock.
-
-    Args:
-        fromdate (str): Start date for retrieval (YYYYMMDD)
-        todate   (str): End date for retrieval (YYYYMMDD)
-        ticker   (str): Stock ticker symbol
-
-    Returns:
-        DataFrame:
-            >> get_stock_market_cap("20150720", "20150724", "005930")
-                              Market Cap  Volume      Trading Value  Listed Shares
-            Date
-            2015-07-24  181030885173000  196584  241383636000  147299337
-            2015-07-23  181767381858000  208965  259446564000  147299337
-            2015-07-22  184566069261000  268323  333813094000  147299337
-            2015-07-21  186039062631000  194055  244129106000  147299337
-            2015-07-20  187806654675000  128928  165366199000  147299337
-    """
-    # Validate and convert date format
-    def validate_date(date_str: Union[str, int]) -> str:
-        try:
-            if isinstance(date_str, int):
-                date_str = str(date_str)
-            # Convert if in YYYY-MM-DD format
-            if '-' in date_str:
-                parsed_date = datetime.strptime(date_str, '%Y-%m-%d')
-                return parsed_date.strftime('%Y%m%d')
-            # Validate if in YYYYMMDD format
-            datetime.strptime(date_str, '%Y%m%d')
-            return date_str
-        except ValueError:
-            raise ValueError(f"Date must be in YYYYMMDD format. Input value: {date_str}")
-
-    def validate_ticker(ticker_str: Union[str, int]) -> str:
-        if isinstance(ticker_str, int):
-            return str(ticker_str)
-        return ticker_str
-
-    try:
-        fromdate = validate_date(fromdate)
-        todate = validate_date(todate)
-        ticker = validate_ticker(ticker)
-
-        logging.debug(f"Retrieving stock market capitalization data: {ticker}, {fromdate}-{todate}")
-
-        # Call get_market_cap
-        df = get_market_cap(fromdate, todate, ticker)
-
-        # Convert DataFrame to dictionary
-        result = df.to_dict(orient='index')
-
-        # Convert datetime index to string and sort in reverse
-        sorted_items = sorted(
-            ((k.strftime('%Y-%m-%d'), v) for k, v in result.items()),
-            reverse=True
-        )
-        result = dict(sorted_items)
-
-        return result
-
-    except Exception as e:
-        error_message = f"Data retrieval failed: {str(e)}"
-        logging.error(error_message)
-        return {"error": error_message}
-
-@mcp.tool()
-def get_stock_fundamental(fromdate: Union[str, int], todate: Union[str, int], ticker: Union[str, int]) -> Dict[str, Any]:
-    """Retrieves fundamental data (PER/PBR/Dividend Yield) for a specific stock.
-
-    Args:
-        fromdate (str): Start date for retrieval (YYYYMMDD)
-        todate   (str): End date for retrieval (YYYYMMDD)
-        ticker   (str): Stock ticker symbol
-
-    Returns:
-        DataFrame:
-            >> get_stock_fundamental("20210104", "20210108", "005930")
-                              BPS        PER       PBR   EPS       DIV   DPS
-                Date
-                2021-01-08  37528  28.046875  2.369141  3166  1.589844  1416
-                2021-01-07  37528  26.187500  2.210938  3166  1.709961  1416
-                2021-01-06  37528  25.953125  2.189453  3166  1.719727  1416
-                2021-01-05  37528  26.500000  2.240234  3166  1.690430  1416
-                2021-01-04  37528  26.218750  2.210938  3166  1.709961  1416
-    """
-    # Validate and convert date format
-    def validate_date(date_str: Union[str, int]) -> str:
-        try:
-            if isinstance(date_str, int):
-                date_str = str(date_str)
-            if '-' in date_str:
-                parsed_date = datetime.strptime(date_str, '%Y-%m-%d')
-                return parsed_date.strftime('%Y%m%d')
-            datetime.strptime(date_str, '%Y%m%d')
-            return date_str
-        except ValueError:
-            raise ValueError(f"Date must be in YYYYMMDD format. Input value: {date_str}")
-
-    def validate_ticker(ticker_str: Union[str, int]) -> str:
-        if isinstance(ticker_str, int):
-            return str(ticker_str)
-        return ticker_str
-
-    try:
-        fromdate = validate_date(fromdate)
-        todate = validate_date(todate)
-        ticker = validate_ticker(ticker)
-
-        logging.debug(f"Retrieving stock fundamental data: {ticker}, {fromdate}-{todate}")
-
-        # Call get_market_fundamental_by_date
-        df = get_market_fundamental_by_date(fromdate, todate, ticker)
-
-        # Convert DataFrame to dictionary
-        result = df.to_dict(orient='index')
-
-        # Convert datetime index to string and sort in reverse
-        sorted_items = sorted(
-            ((k.strftime('%Y-%m-%d'), v) for k, v in result.items()),
-            reverse=True
-        )
-        result = dict(sorted_items)
-
-        return result
-
-    except Exception as e:
-        error_message = f"Data retrieval failed: {str(e)}"
-        logging.error(error_message)
-        return {"error": error_message}
-
-@mcp.tool()
-def get_stock_trading_volume(fromdate: Union[str, int], todate: Union[str, int], ticker: Union[str, int]) -> Dict[str, Any]:
-    """Retrieves trading volume by investor type for a specific stock.
-
-    Args:
-        fromdate (str): Start date for retrieval (YYYYMMDD)
-        todate   (str): End date for retrieval (YYYYMMDD)
-        ticker   (str): Stock ticker symbol
-
-    Returns:
-        DataFrame with columns:
-        - Volume (Sell/Buy/Net Buy)
-        - Trading Value (Sell/Buy/Net Buy)
-        Broken down by investor types (Financial Investment, Insurance, Trust, etc.)
-    """
-    # Validate and convert date format
-    def validate_date(date_str: Union[str, int]) -> str:
-        try:
-            if isinstance(date_str, int):
-                date_str = str(date_str)
-            if '-' in date_str:
-                parsed_date = datetime.strptime(date_str, '%Y-%m-%d')
-                return parsed_date.strftime('%Y%m%d')
-            datetime.strptime(date_str, '%Y%m%d')
-            return date_str
-        except ValueError:
-            raise ValueError(f"Date must be in YYYYMMDD format. Input value: {date_str}")
-
-    def validate_ticker(ticker_str: Union[str, int]) -> str:
-        if isinstance(ticker_str, int):
-            return str(ticker_str)
-        return ticker_str
-
-    try:
-        fromdate = validate_date(fromdate)
-        todate = validate_date(todate)
-        ticker = validate_ticker(ticker)
-
-        logging.debug(f"Retrieving stock trading volume by investor type: {ticker}, {fromdate}-{todate}")
-
-        # Call get_market_trading_volume_by_date
-        df = get_market_trading_volume_by_date(fromdate, todate, ticker)
-
-        # Convert DataFrame to dictionary
-        result = df.to_dict(orient='index')
-
-        # Convert datetime index to string and sort in reverse
-        sorted_items = sorted(
-            ((k.strftime('%Y-%m-%d'), v) for k, v in result.items()),
-            reverse=True
-        )
-        result = dict(sorted_items)
-
-        return result
-
-    except Exception as e:
-        error_message = f"Data retrieval failed: {str(e)}"
-        logging.error(error_message)
-        return {"error": error_message}
-
-
-@mcp.tool()
-def get_index_ohlcv(fromdate: Union[str, int], todate: Union[str, int], ticker: Union[str, int], freq: str = 'd') -> \
-Dict[str, Any]:
-    """Retrieves OHLCV data for a specific index.
-
-    Args:
-        fromdate (str): Start date for retrieval (YYYYMMDD)
-        todate   (str): End date for retrieval (YYYYMMDD)
-        ticker   (str): Index ticker symbol (e.g., 1001 for KOSPI, 2001 for KOSDAQ)
-        freq     (str, optional): d - daily / m - monthly / y - yearly. Defaults to 'd'.
-
-    Returns:
-        DataFrame:
-            >> get_index_ohlcv("20210101", "20210130", "1001")
-                           Open     High      Low    Close       Volume    Trading Value
-            Date
-            2021-01-04  2874.50  2946.54  2869.11  2944.45  1026510465  25011393960858
-            2021-01-05  2943.67  2990.57  2921.84  2990.57  1519911750  26548380179493
-            2021-01-06  2993.34  3027.16  2961.37  2968.21  1793418534  29909396443430
-            2021-01-07  2980.75  3055.28  2980.75  3031.68  1524654500  27182807334912
-            2021-01-08  3040.11  3161.11  3040.11  3152.18  1297903388  40909490005818
-    """
-
-    # Validate and convert date format
-    def validate_date(date_str: Union[str, int]) -> str:
-        try:
-            if isinstance(date_str, int):
-                date_str = str(date_str)
-            if '-' in date_str:
-                parsed_date = datetime.strptime(date_str, '%Y-%m-%d')
-                return parsed_date.strftime('%Y%m%d')
-            datetime.strptime(date_str, '%Y%m%d')
-            return date_str
-        except ValueError:
-            raise ValueError(f"Date must be in YYYYMMDD format. Input value: {date_str}")
-
-    def validate_ticker(ticker_str: Union[str, int]) -> str:
-        if isinstance(ticker_str, int):
-            return str(ticker_str)
-        return ticker_str
-
-    def validate_freq(freq_str: str) -> str:
-        valid_freqs = ['d', 'm', 'y']
-        if freq_str not in valid_freqs:
-            raise ValueError(f"Frequency must be one of {valid_freqs}. Input value: {freq_str}")
-        return freq_str
-
-    try:
-        fromdate = validate_date(fromdate)
-        todate = validate_date(todate)
-        ticker = validate_ticker(ticker)
-        freq = validate_freq(freq)
-
-        logging.debug(f"Retrieving index OHLCV data: {ticker}, {fromdate}-{todate}, freq={freq}")
-
-        # Call get_index_ohlcv_by_date
-        # Note: name_display is set to False to match the pattern of other functions
-        df = get_index_ohlcv_by_date(fromdate, todate, ticker, freq=freq, name_display=False)
-
-        # Convert DataFrame to dictionary
-        result = df.to_dict(orient='index')
-
-        # Convert datetime index to string and sort in reverse
-        sorted_items = sorted(
-            ((k.strftime('%Y-%m-%d'), v) for k, v in result.items()),
-            reverse=True
-        )
-        result = dict(sorted_items)
-
-        return result
-
-    except Exception as e:
-        error_message = f"Data retrieval failed: {str(e)}"
-        logging.error(error_message)
-        return {"error": error_message}
 
 
 def main():
