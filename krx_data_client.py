@@ -770,7 +770,9 @@ class KRXDataClient:
 
     def _get_isin(self, ticker: str, date: str) -> Optional[str]:
         """ticker에서 ISIN 조회"""
-        self._build_isin_cache(date)
+        # ISIN 캐시는 가장 최근 영업일 기준으로 구축 (장 시작 전/휴일에도 동작)
+        cache_date = self.get_nearest_business_day(date)
+        self._build_isin_cache(cache_date)
         isin = self._isin_cache.get(ticker)
 
         # fundamental_all에서 못 찾으면 finder_stkisu에서 검색 (외국 상장사 등)
