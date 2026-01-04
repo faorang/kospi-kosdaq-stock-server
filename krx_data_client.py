@@ -771,7 +771,24 @@ class KRXDataClient:
     def _get_isin(self, ticker: str, date: str) -> Optional[str]:
         """ticker에서 ISIN 조회"""
         self._build_isin_cache(date)
-        return self._isin_cache.get(ticker)
+        isin = self._isin_cache.get(ticker)
+
+        # fundamental_all에서 못 찾으면 finder_stkisu에서 검색 (외국 상장사 등)
+        if not isin:
+            items = self._request(
+                self.BLD["finder_stkisu"],
+                {"locale": "ko_KR", "mktsel": "ALL", "searchText": ticker, "typeNo": 0}
+            )
+            for item in items:
+                if item.get("short_code") == ticker:
+                    isin = item.get("full_code")
+                    # 캐시에 추가
+                    if isin:
+                        self._isin_cache[ticker] = isin
+                        logger.debug(f"finder_stkisu에서 ISIN 찾음: {ticker} -> {isin}")
+                    break
+
+        return isin
 
     # =========================================================================
     # OHLCV (시세)
