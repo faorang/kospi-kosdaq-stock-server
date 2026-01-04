@@ -96,12 +96,15 @@ def retry_on_session_expired(max_retries: int = 3, delay: float = 1.0):
                 except KRXSessionExpiredError as e:
                     last_exception = e
                     logger.warning(f"세션 만료 (시도 {attempt + 1}/{max_retries}), 재로그인...")
-                    time.sleep(delay)
+                    time.sleep(delay * (attempt + 1))  # exponential backoff
                     try:
+                        # 세션 파일 삭제 후 재로그인
+                        self._auth_manager._cleanup_session_files()
                         self._auth_manager.login(force=True)
                     except Exception as login_error:
                         logger.error(f"재로그인 실패: {login_error}")
-                        raise
+                        if attempt == max_retries - 1:
+                            raise
                 except Exception as e:
                     # 다른 에러는 재시도하지 않음
                     raise
@@ -123,6 +126,12 @@ class KakaoAuthManager:
     COOKIE_PATH = Path.home() / ".krx_session.json"
     LEGACY_COOKIE_PATH = Path.home() / ".krx_cookies.json"  # 기존 쿠키 파일
     SESSION_TIMEOUT = timedelta(hours=4)  # 세션 타임아웃 (보수적 설정)
+    SESSION_REFRESH_THRESHOLD = timedelta(hours=3)  # 이 시간 이후면 선제적 갱신
+
+    # Playwright 타임아웃 설정 (운영 안정성을 위해 충분히 길게)
+    PAGE_LOAD_TIMEOUT = 60000  # 60초
+    LOGIN_WAIT_TIMEOUT = 30000  # 30초
+    MAX_LOGIN_RETRIES = 3  # 로그인 재시도 횟수
 
     def __init__(
         self,
@@ -239,6 +248,21 @@ class KakaoAuthManager:
         except Exception as e:
             logger.warning(f"세션 저장 실패: {e}")
 
+    def _cleanup_session_files(self):
+        """세션 파일 삭제 (손상/만료 시 호출)"""
+        for path in [self.COOKIE_PATH, self.LEGACY_COOKIE_PATH]:
+            try:
+                if path.exists():
+                    path.unlink()
+                    logger.info(f"세션 파일 삭제: {path}")
+            except Exception as e:
+                logger.warning(f"세션 파일 삭제 실패: {path}, {e}")
+
+        # 세션 정보 초기화
+        self._session_info = None
+        if self._session:
+            self._session.cookies.clear()
+
     def _validate_session(self) -> bool:
         """세션 유효성 검증 (실제 API 호출로 체크)"""
         try:
@@ -289,7 +313,7 @@ class KakaoAuthManager:
 
     def login(self, force: bool = False) -> bool:
         """
-        카카오 로그인
+        카카오 로그인 (자동 재시도 포함)
 
         Args:
             force: True면 기존 세션 무시하고 재로그인
@@ -306,14 +330,33 @@ class KakaoAuthManager:
                 logger.info("기존 세션이 유효합니다.")
                 return True
             logger.info("기존 세션이 만료되어 재로그인합니다.")
+            self._cleanup_session_files()
 
-        # Playwright로 로그인
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(self._login_async())
-        finally:
-            loop.close()
+        # Playwright로 로그인 (재시도 로직 포함)
+        last_error = None
+        for attempt in range(self.MAX_LOGIN_RETRIES):
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    result = loop.run_until_complete(self._login_async())
+                    if result:
+                        return True
+                finally:
+                    loop.close()
+            except KRX2FARequiredError:
+                # 2FA 에러는 재시도해도 의미 없음
+                raise
+            except Exception as e:
+                last_error = e
+                logger.warning(f"로그인 시도 {attempt + 1}/{self.MAX_LOGIN_RETRIES} 실패: {e}")
+                if attempt < self.MAX_LOGIN_RETRIES - 1:
+                    wait_time = (attempt + 1) * 5  # 5초, 10초, 15초...
+                    logger.info(f"{wait_time}초 후 재시도...")
+                    time.sleep(wait_time)
+                    self._cleanup_session_files()
+
+        raise KRXAuthError(f"로그인 실패 (최대 재시도 횟수 초과): {last_error}")
 
     async def _login_async(self) -> bool:
         """비동기 로그인 처리"""
@@ -341,7 +384,7 @@ class KakaoAuthManager:
         try:
             # KRX 로그인 페이지
             login_url = "https://data.krx.co.kr/contents/MDC/COMS/client/MDCCOMS001.cmd"
-            await page.goto(login_url, wait_until="networkidle", timeout=30000)
+            await page.goto(login_url, wait_until="networkidle", timeout=self.PAGE_LOAD_TIMEOUT)
             await asyncio.sleep(2)
 
             # iframe에서 카카오 로그인 버튼 클릭
@@ -352,12 +395,12 @@ class KakaoAuthManager:
             frame = await iframe.content_frame()
             kakao_btn = await frame.wait_for_selector(
                 'a.ms-kakao, a:has-text("카카오로 로그인")',
-                timeout=10000
+                timeout=self.LOGIN_WAIT_TIMEOUT
             )
             await kakao_btn.click()
 
             # 카카오 로그인 페이지 대기
-            await page.wait_for_url("**/accounts.kakao.com/**", timeout=15000)
+            await page.wait_for_url("**/accounts.kakao.com/**", timeout=self.LOGIN_WAIT_TIMEOUT)
             await page.wait_for_load_state("networkidle")
             await asyncio.sleep(1)
 
@@ -487,6 +530,14 @@ class KakaoAuthManager:
             await self._playwright.stop()
             self._playwright = None
 
+    def _needs_refresh(self) -> bool:
+        """세션 선제적 갱신이 필요한지 확인"""
+        if not self._session_info:
+            return True
+
+        elapsed = datetime.now() - self._session_info.last_login
+        return elapsed >= self.SESSION_REFRESH_THRESHOLD
+
     def check_session(self) -> bool:
         """
         세션 상태 체크 및 필요시 재로그인
@@ -497,8 +548,17 @@ class KakaoAuthManager:
         if not self.is_logged_in:
             return self.login()
 
+        # 선제적 갱신: 만료되기 전에 미리 갱신
+        if self._needs_refresh():
+            logger.info("세션 만료 예정, 선제적 갱신 시도...")
+            if not self._validate_session():
+                logger.info("세션이 만료되어 재로그인합니다.")
+                self._cleanup_session_files()
+                return self.login(force=True)
+
         if not self._validate_session():
             logger.info("세션이 만료되어 재로그인합니다.")
+            self._cleanup_session_files()
             return self.login(force=True)
 
         return True
@@ -1431,13 +1491,27 @@ class KRXDataClient:
 
         Returns:
             영업일 (YYYYMMDD)
+
+        Note:
+            - 장 시작 전(09:00 이전)에는 전 영업일을 반환
+            - 장 마감 후에는 당일을 반환
         """
         if target_date:
             dt = datetime.strptime(target_date, "%Y%m%d").date()
+            # 특정 날짜가 지정된 경우 시간 체크 안함
+            check_market_hours = False
         else:
             dt = date.today()
+            check_market_hours = True
 
         kr_holidays = KR()
+
+        # 장 시작 전(09:00 이전)이면 전일 기준으로 탐색
+        if check_market_hours:
+            now = datetime.now()
+            if now.hour < 9:
+                # 오늘이 영업일이어도 아직 데이터가 없으므로 전일부터 탐색
+                dt -= timedelta(days=1)
 
         # 최대 10일 전까지 탐색
         for _ in range(10):

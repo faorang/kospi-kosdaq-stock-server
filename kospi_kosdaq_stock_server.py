@@ -38,7 +38,8 @@ mcp = FastMCP(
 
 # Global clients (lazy initialization)
 _krx_client = None
-_use_pykrx_fallback = True  # pykrx 폴백 사용 여부
+_krx_client_initialized = False
+_use_pykrx_fallback = False  # pykrx 폴백 비활성화 (KRX에서 로그인 필수화됨)
 
 # Global variable to store ticker information in memory
 TICKER_MAP: Dict[str, str] = {}
@@ -46,15 +47,30 @@ TICKER_MAP: Dict[str, str] = {}
 
 def _get_krx_client():
     """KRX Data Client 가져오기 (lazy init)"""
-    global _krx_client
-    if _krx_client is None:
-        try:
-            from krx_data_client import KRXDataClient
-            _krx_client = KRXDataClient(headless=True, auto_login=True)
-            logger.info("KRX Data Client 초기화 완료")
-        except Exception as e:
-            logger.warning(f"KRX Data Client 초기화 실패: {e}")
-            return None
+    global _krx_client, _krx_client_initialized
+
+    # 이미 초기화 시도했으면 결과 반환
+    if _krx_client_initialized:
+        return _krx_client
+
+    _krx_client_initialized = True
+
+    # KAKAO_ID, KAKAO_PW 환경변수 확인
+    kakao_id = os.environ.get("KAKAO_ID")
+    kakao_pw = os.environ.get("KAKAO_PW")
+
+    if not kakao_id or not kakao_pw:
+        logger.warning("KAKAO_ID, KAKAO_PW 환경변수가 설정되지 않았습니다.")
+        return None
+
+    try:
+        from krx_data_client import KRXDataClient
+        _krx_client = KRXDataClient(headless=True, auto_login=True)
+        logger.info("KRX Data Client 초기화 완료")
+    except Exception as e:
+        logger.error(f"KRX Data Client 초기화 실패: {e}")
+        _krx_client = None
+
     return _krx_client
 
 
@@ -147,7 +163,7 @@ def load_all_tickers() -> Dict[str, str]:
             except Exception as e:
                 logger.warning(f"KRX Data Client 실패: {e}")
 
-        # 2. pykrx 폴백
+        # 2. pykrx 폴백 (비활성화됨 - KRX에서 로그인 필수화)
         if _use_pykrx():
             logger.info("pykrx로 폴백합니다...")
             from pykrx.stock.stock_api import get_nearest_business_day_in_a_week
@@ -163,7 +179,7 @@ def load_all_tickers() -> Dict[str, str]:
             logger.info(f"pykrx로 {len(TICKER_MAP)}개 종목 로드")
             return TICKER_MAP
 
-        return {"error": "데이터 소스가 없습니다. 환경변수를 확인하세요."}
+        return {"error": "종목 정보 조회 실패. KAKAO_ID, KAKAO_PW 환경변수를 확인하세요."}
 
     except Exception as e:
         error_message = f"Failed to retrieve ticker information: {str(e)}"
@@ -222,14 +238,14 @@ def get_stock_ohlcv(
             except Exception as e:
                 logger.warning(f"KRX Data Client 실패: {e}")
 
-        # 2. pykrx 폴백
+        # 2. pykrx 폴백 (비활성화됨 - KRX에서 로그인 필수화)
         if _use_pykrx():
             logger.info("pykrx로 폴백합니다...")
             from pykrx.stock.stock_api import get_market_ohlcv
             df = get_market_ohlcv(fromdate, todate, ticker, adjusted=adjusted)
             return df_to_dict_with_date_index(df)
 
-        return {"error": "데이터 소스가 없습니다."}
+        return {"error": "OHLCV 데이터 조회 실패. KAKAO_ID, KAKAO_PW 환경변수를 확인하세요."}
 
     except Exception as e:
         error_message = f"Data retrieval failed: {str(e)}"
@@ -271,14 +287,14 @@ def get_stock_market_cap(
             except Exception as e:
                 logger.warning(f"KRX Data Client 실패: {e}")
 
-        # 2. pykrx 폴백
+        # 2. pykrx 폴백 (비활성화됨 - KRX에서 로그인 필수화)
         if _use_pykrx():
             logger.info("pykrx로 폴백합니다...")
             from pykrx.stock.stock_api import get_market_cap
             df = get_market_cap(fromdate, todate, ticker)
             return df_to_dict_with_date_index(df)
 
-        return {"error": "데이터 소스가 없습니다."}
+        return {"error": "시가총액 데이터 조회 실패. KAKAO_ID, KAKAO_PW 환경변수를 확인하세요."}
 
     except Exception as e:
         error_message = f"Data retrieval failed: {str(e)}"
@@ -320,14 +336,14 @@ def get_stock_fundamental(
             except Exception as e:
                 logger.warning(f"KRX Data Client 실패: {e}")
 
-        # 2. pykrx 폴백
+        # 2. pykrx 폴백 (비활성화됨 - KRX에서 로그인 필수화)
         if _use_pykrx():
             logger.info("pykrx로 폴백합니다...")
             from pykrx.stock.stock_api import get_market_fundamental_by_date
             df = get_market_fundamental_by_date(fromdate, todate, ticker)
             return df_to_dict_with_date_index(df)
 
-        return {"error": "데이터 소스가 없습니다. KAKAO_ID, KAKAO_PW 환경변수를 확인하세요."}
+        return {"error": "Fundamental 데이터 조회 실패. KAKAO_ID, KAKAO_PW 환경변수를 확인하세요."}
 
     except Exception as e:
         error_message = f"Data retrieval failed: {str(e)}"
@@ -373,14 +389,14 @@ def get_stock_trading_volume(
             except Exception as e:
                 logger.warning(f"KRX Data Client 실패: {e}")
 
-        # 2. pykrx 폴백
+        # 2. pykrx 폴백 (비활성화됨 - KRX에서 로그인 필수화)
         if _use_pykrx():
             logger.info("pykrx로 폴백합니다...")
             from pykrx.stock.stock_api import get_market_trading_volume_by_date
             df = get_market_trading_volume_by_date(fromdate, todate, ticker)
             return df_to_dict_with_date_index(df)
 
-        return {"error": "데이터 소스가 없습니다. KAKAO_ID, KAKAO_PW 환경변수를 확인하세요."}
+        return {"error": "투자자별 거래량 조회 실패. KAKAO_ID, KAKAO_PW 환경변수를 확인하세요."}
 
     except Exception as e:
         error_message = f"Data retrieval failed: {str(e)}"
@@ -432,14 +448,14 @@ def get_index_ohlcv(
             except Exception as e:
                 logger.warning(f"KRX Data Client 실패: {e}")
 
-        # 2. pykrx 폴백
+        # 2. pykrx 폴백 (비활성화됨 - KRX에서 로그인 필수화)
         if _use_pykrx():
             logger.info("pykrx로 폴백합니다...")
             from pykrx.stock.stock_api import get_index_ohlcv_by_date
             df = get_index_ohlcv_by_date(fromdate, todate, ticker, freq=freq, name_display=False)
             return df_to_dict_with_date_index(df)
 
-        return {"error": "지수 데이터 소스가 없습니다."}
+        return {"error": "지수 데이터 조회 실패. KAKAO_ID, KAKAO_PW 환경변수를 확인하세요."}
 
     except Exception as e:
         error_message = f"Data retrieval failed: {str(e)}"
