@@ -1193,8 +1193,9 @@ class KRXDataClient:
         }
         mkt_id = market_map.get(market.upper(), "ALL")
 
+        # MDCSTAT01501 (전종목 시세) endpoint 사용 - MKTCAP 포함
         items = self._request(
-            self.BLD["fundamental_all"],
+            self.BLD["ohlcv_all"],
             {
                 "mktId": mkt_id,
                 "trdDd": date,
