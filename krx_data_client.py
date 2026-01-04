@@ -263,16 +263,47 @@ class KakaoAuthManager:
         if self._session:
             self._session.cookies.clear()
 
+    def _get_recent_business_day(self) -> str:
+        """가장 최근 영업일 반환 (세션 검증용)"""
+        kr_holidays = KR()
+        dt = date.today()
+
+        # 장 시작 전(09:00 이전)이면 전일부터 탐색
+        if datetime.now().hour < 9:
+            dt -= timedelta(days=1)
+
+        # 최대 10일 전까지 탐색
+        for _ in range(10):
+            # 주말 체크
+            if dt.weekday() >= 5:
+                dt -= timedelta(days=1)
+                continue
+            # 공휴일 체크
+            if dt in kr_holidays:
+                dt -= timedelta(days=1)
+                continue
+            # 연말(12/31), 노동절(5/1) 체크
+            if (dt.month == 12 and dt.day == 31) or (dt.month == 5 and dt.day == 1):
+                dt -= timedelta(days=1)
+                continue
+            return dt.strftime("%Y%m%d")
+            dt -= timedelta(days=1)
+
+        return dt.strftime("%Y%m%d")
+
     def _validate_session(self) -> bool:
         """세션 유효성 검증 (실제 API 호출로 체크)"""
         try:
+            # 가장 최근 영업일 계산 (장 시작 전/휴일에도 동작)
+            check_date = self._get_recent_business_day()
+
             # 간단한 API 호출로 세션 유효성 체크
             resp = self.session.post(
                 "http://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd",
                 data={
                     "bld": "dbms/MDC/STAT/standard/MDCSTAT03501",
                     "mktId": "STK",
-                    "trdDd": datetime.now().strftime("%Y%m%d"),
+                    "trdDd": check_date,
                 },
                 timeout=10
             )
@@ -1200,6 +1231,9 @@ class KRXDataClient:
         Returns:
             DataFrame: 종목코드 인덱스, OHLCV 컬럼
         """
+        # 가장 최근 영업일로 변환 (장 시작 전/휴일에도 동작)
+        query_date = self.get_nearest_business_day(date)
+
         market_map = {
             "ALL": "ALL",
             "KOSPI": "STK",
@@ -1212,7 +1246,7 @@ class KRXDataClient:
             "dbms/MDC/STAT/standard/MDCSTAT01501",
             {
                 "mktId": mkt_id,
-                "trdDd": date,
+                "trdDd": query_date,
             }
         )
 
@@ -1264,6 +1298,9 @@ class KRXDataClient:
         Returns:
             DataFrame: 종목코드 인덱스, 시가총액/거래량/거래대금/상장주식수 컬럼
         """
+        # 가장 최근 영업일로 변환 (장 시작 전/휴일에도 동작)
+        query_date = self.get_nearest_business_day(date)
+
         market_map = {
             "ALL": "ALL",
             "KOSPI": "STK",
@@ -1277,7 +1314,7 @@ class KRXDataClient:
             self.BLD["ohlcv_all"],
             {
                 "mktId": mkt_id,
-                "trdDd": date,
+                "trdDd": query_date,
             }
         )
 
