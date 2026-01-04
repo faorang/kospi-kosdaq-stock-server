@@ -1495,19 +1495,19 @@ class KRXDataClient:
         Note:
             - 장 시작 전(09:00 이전)에는 전 영업일을 반환
             - 장 마감 후에는 당일을 반환
+            - 전달된 날짜가 오늘인 경우에도 동일하게 적용
         """
+        today = date.today()
+
         if target_date:
             dt = datetime.strptime(target_date, "%Y%m%d").date()
-            # 특정 날짜가 지정된 경우 시간 체크 안함
-            check_market_hours = False
         else:
-            dt = date.today()
-            check_market_hours = True
+            dt = today
 
         kr_holidays = KR()
 
-        # 장 시작 전(09:00 이전)이면 전일 기준으로 탐색
-        if check_market_hours:
+        # 오늘 날짜인 경우, 장 시작 전(09:00 이전)이면 전일 기준으로 탐색
+        if dt == today:
             now = datetime.now()
             if now.hour < 9:
                 # 오늘이 영업일이어도 아직 데이터가 없으므로 전일부터 탐색
