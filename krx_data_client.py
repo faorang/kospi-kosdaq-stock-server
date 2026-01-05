@@ -722,6 +722,12 @@ class KRXDataClient:
             else:
                 return []
 
+        except requests.exceptions.HTTPError as e:
+            # 400 Bad Request는 세션 만료일 가능성이 있으므로 재시도 유도
+            if e.response is not None and e.response.status_code == 400:
+                logger.warning(f"400 Bad Request 발생, 세션 문제일 수 있음: {e}")
+                raise KRXSessionExpiredError(f"세션 문제로 추정되는 400 에러: {e}")
+            raise KRXDataError(f"API 요청 실패: {e}")
         except requests.exceptions.RequestException as e:
             raise KRXDataError(f"API 요청 실패: {e}")
 
