@@ -196,6 +196,7 @@ class KakaoAuthManager:
 
                 data = json.loads(self.COOKIE_PATH.read_text())
                 cookies = data.get("cookies", {})
+                krx_cookies = data.get("krx_cookies", [])  # domain 포함된 쿠키 정보
                 last_login_str = data.get("last_login")
                 last_validated_str = data.get("last_validated")  # 마지막 검증 시간
 
@@ -204,13 +205,25 @@ class KakaoAuthManager:
 
                     # 타임아웃 체크
                     if datetime.now() - last_login <= self.SESSION_TIMEOUT:
-                        # 세션에 쿠키 적용 (domain 필수!)
-                        for name, value in cookies.items():
-                            self.session.cookies.set(
-                                name, value,
-                                domain="data.krx.co.kr",
-                                path="/"
-                            )
+                        # 세션에 쿠키 적용
+                        if krx_cookies:
+                            # 새 형식: domain, path 포함된 쿠키 사용
+                            for cookie in krx_cookies:
+                                self.session.cookies.set(
+                                    cookie["name"],
+                                    cookie["value"],
+                                    domain=cookie.get("domain", "data.krx.co.kr"),
+                                    path=cookie.get("path", "/")
+                                )
+                            logger.debug(f"KRX 쿠키 {len(krx_cookies)}개 로드됨")
+                        else:
+                            # 기존 형식: domain 하드코딩
+                            for name, value in cookies.items():
+                                self.session.cookies.set(
+                                    name, value,
+                                    domain="data.krx.co.kr",
+                                    path="/"
+                                )
 
                         self._session_info = SessionInfo(
                             cookies=cookies,
@@ -259,12 +272,13 @@ class KakaoAuthManager:
 
         return False
 
-    def _save_session(self, cookies: Dict[str, str], update_validated: bool = True):
+    def _save_session(self, cookies: Dict[str, str], update_validated: bool = True, krx_cookies: List[Dict] = None):
         """세션 저장"""
         try:
             now = datetime.now()
             data = {
                 "cookies": cookies,
+                "krx_cookies": krx_cookies or [],  # domain, path 포함된 전체 쿠키 정보
                 "last_login": now.isoformat(),
                 "last_validated": now.isoformat() if update_validated else None
             }
@@ -567,27 +581,34 @@ class KakaoAuthManager:
             # 쿠키 추출 및 저장
             cookies = await context.cookies()
             cookie_dict = {}
+            krx_cookies = []
 
-            # requests 세션에 쿠키 적용 (domain, path 포함해야 정상 동작)
+            # KRX 관련 쿠키만 필터링 및 적용
             for cookie in cookies:
                 name = cookie["name"]
                 value = cookie["value"]
                 domain = cookie.get("domain", "")
                 path = cookie.get("path", "/")
 
-                self.session.cookies.set(
-                    name, value,
-                    domain=domain,
-                    path=path
-                )
-                cookie_dict[name] = value
+                # KRX 도메인 쿠키만 저장 (카카오 쿠키는 제외)
+                if "krx.co.kr" in domain:
+                    logger.debug(f"KRX 쿠키 발견: {name}={value[:20]}..., domain={domain}")
+                    self.session.cookies.set(
+                        name, value,
+                        domain=domain,
+                        path=path
+                    )
+                    cookie_dict[name] = value
+                    krx_cookies.append({"name": name, "value": value, "domain": domain, "path": path})
+
+            logger.info(f"KRX 쿠키 {len(krx_cookies)}개 저장됨")
 
             self._session_info = SessionInfo(
                 cookies=cookie_dict,
                 last_login=datetime.now()
             )
 
-            self._save_session(cookie_dict)
+            self._save_session(cookie_dict, krx_cookies=krx_cookies)
 
             logger.info("카카오 로그인 성공")
             return True
