@@ -822,16 +822,24 @@ class KRXDataClient:
         return self._auth_manager.session
 
     def _ensure_session(self):
-        """세션 유효성 확인 (freshness 체크로 불필요한 검증 방지)"""
+        """
+        세션 유효성 확인 - 클라이언트는 이 메서드를 직접 호출할 필요 없음
+
+        자동으로 처리되는 것들:
+        1. 프로세스 내 캐시된 세션 재사용 (5분간)
+        2. 파일에 저장된 세션 로드 및 재사용 (다른 프로세스가 검증한 세션)
+        3. 세션 만료 시 자동 재로그인 (파일 락으로 동시 로그인 방지)
+        """
         global _last_session_check_time
 
-        # 최근에 세션 검증이 성공했으면 생략 (프로세스 내 재사용)
+        # 1. 프로세스 내 캐시 확인 (가장 빠름)
         if _last_session_check_time and datetime.now() - _last_session_check_time < FRESH_SESSION_THRESHOLD:
-            return  # 최근 검증 성공, 생략
+            return
 
-        if not self._auth_manager.is_logged_in:
-            if not self._auth_manager.login():
-                raise KRXSessionExpiredError("세션을 복구할 수 없습니다.")
+        # 2. 파일에서 세션 로드 (다른 프로세스가 검증한 세션 재사용)
+        #    login() 메서드가 파일 기반 세션 공유, 파일 락, 자동 재로그인 모두 처리함
+        if not self._auth_manager.login():
+            raise KRXSessionExpiredError("세션을 복구할 수 없습니다.")
 
         # 검증 성공 시간 기록
         _last_session_check_time = datetime.now()
@@ -1923,15 +1931,18 @@ def _get_client() -> KRXDataClient:
 
 def ensure_session_valid() -> bool:
     """
-    세션 유효성 확인 및 프리워밍 (orchestrator 시작 시 호출 권장)
+    [DEPRECATED] 세션 유효성 확인 - 호출할 필요 없음
 
-    이 함수를 orchestrator 시작 시 한 번 호출하면:
-    1. 세션이 없으면 로그인 (카카오 알림 1회)
-    2. 세션이 있고 유효하면 그대로 사용
-    3. 이후 FRESH_SESSION_THRESHOLD 동안 재검증 생략
+    v0.3.19부터 모든 API 호출 시 자동으로 세션이 관리됩니다:
+    - 세션 만료 시 자동 재로그인
+    - 파일 락으로 동시 로그인 방지
+    - 프로세스 간 세션 공유
+
+    클라이언트는 그냥 데이터를 요청하면 됩니다.
+    이 함수는 하위 호환성을 위해 유지되며, 호출해도 무해합니다.
 
     Returns:
-        세션 유효 여부
+        항상 True (세션이 자동으로 복구되므로)
     """
     global _last_session_check_time
 
