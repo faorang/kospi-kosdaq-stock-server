@@ -127,6 +127,7 @@ class KakaoAuthManager:
     LEGACY_COOKIE_PATH = Path.home() / ".krx_cookies.json"  # 기존 쿠키 파일
     SESSION_TIMEOUT = timedelta(hours=4)  # 세션 타임아웃 (보수적 설정)
     SESSION_REFRESH_THRESHOLD = timedelta(hours=3)  # 이 시간 이후면 선제적 갱신
+    VALIDATION_SKIP_THRESHOLD = timedelta(minutes=5)  # 이 시간 내 검증됐으면 재검증 생략
 
     # Playwright 타임아웃 설정 (운영 안정성을 위해 충분히 길게)
     PAGE_LOAD_TIMEOUT = 60000  # 60초
@@ -145,6 +146,7 @@ class KakaoAuthManager:
 
         self._session: Optional[requests.Session] = None
         self._session_info: Optional[SessionInfo] = None
+        self._last_validated: Optional[datetime] = None  # 마지막 세션 검증 시간 (파일에서 로드)
         self._browser = None
         self._playwright = None
 
@@ -191,6 +193,7 @@ class KakaoAuthManager:
                 data = json.loads(self.COOKIE_PATH.read_text())
                 cookies = data.get("cookies", {})
                 last_login_str = data.get("last_login")
+                last_validated_str = data.get("last_validated")  # 마지막 검증 시간
 
                 if cookies and last_login_str:
                     last_login = datetime.fromisoformat(last_login_str)
@@ -205,6 +208,10 @@ class KakaoAuthManager:
                             cookies=cookies,
                             last_login=last_login
                         )
+
+                        # 마지막 검증 시간 로드
+                        if last_validated_str:
+                            self._last_validated = datetime.fromisoformat(last_validated_str)
 
                         logger.info("저장된 세션을 로드했습니다.")
                         return True
@@ -236,17 +243,36 @@ class KakaoAuthManager:
 
         return False
 
-    def _save_session(self, cookies: Dict[str, str]):
+    def _save_session(self, cookies: Dict[str, str], update_validated: bool = True):
         """세션 저장"""
         try:
+            now = datetime.now()
             data = {
                 "cookies": cookies,
-                "last_login": datetime.now().isoformat()
+                "last_login": now.isoformat(),
+                "last_validated": now.isoformat() if update_validated else None
             }
             self.COOKIE_PATH.write_text(json.dumps(data, indent=2))
+            if update_validated:
+                self._last_validated = now
             logger.info("세션을 저장했습니다.")
         except Exception as e:
             logger.warning(f"세션 저장 실패: {e}")
+
+    def _update_last_validated(self):
+        """세션 파일의 last_validated만 업데이트 (검증 성공 시 호출)"""
+        try:
+            if not self.COOKIE_PATH.exists():
+                return
+
+            data = json.loads(self.COOKIE_PATH.read_text())
+            now = datetime.now()
+            data["last_validated"] = now.isoformat()
+            self.COOKIE_PATH.write_text(json.dumps(data, indent=2))
+            self._last_validated = now
+            logger.debug("세션 검증 시간 업데이트")
+        except Exception as e:
+            logger.warning(f"세션 검증 시간 업데이트 실패: {e}")
 
     def _cleanup_session_files(self):
         """세션 파일 삭제 (손상/만료 시 호출)"""
@@ -357,7 +383,13 @@ class KakaoAuthManager:
         """
         # 기존 세션 체크
         if not force and self._load_session():
+            # 최근 검증됐으면 재검증 생략 (다른 프로세스에서 검증한 경우 포함)
+            if self._last_validated and datetime.now() - self._last_validated < self.VALIDATION_SKIP_THRESHOLD:
+                logger.info(f"최근 검증된 세션 사용 (검증 시각: {self._last_validated})")
+                return True
+
             if self._validate_session():
+                self._update_last_validated()  # 검증 성공 시 파일에 기록
                 logger.info("기존 세션이 유효합니다.")
                 return True
             logger.info("기존 세션이 만료되어 재로그인합니다.")
