@@ -772,10 +772,32 @@ class KRXDataClient:
                 return []
 
         except requests.exceptions.HTTPError as e:
-            # 400 Bad Request는 세션 만료일 가능성이 있으므로 재시도 유도
             if e.response is not None and e.response.status_code == 400:
-                logger.warning(f"400 Bad Request 발생, 세션 문제일 수 있음: {e}")
-                raise KRXSessionExpiredError(f"세션 문제로 추정되는 400 에러: {e}")
+                # 400 에러의 실제 원인 파악
+                response_text = e.response.text[:200] if e.response.text else "(empty)"
+                content_type = e.response.headers.get("Content-Type", "")
+                logger.warning(f"400 Bad Request - 응답: {response_text}, Content-Type: {content_type}")
+                logger.debug(f"요청 파라미터: {request_data}")
+
+                # 세션 문제 여부 판단
+                is_session_issue = False
+                if "text/html" in content_type:
+                    # HTML 응답 = 로그인 페이지로 리다이렉트됨
+                    is_session_issue = True
+                    logger.info("HTML 응답 감지 - 세션 만료로 판단")
+                elif not e.response.text or e.response.text.strip() == "":
+                    # 빈 응답 = 세션 문제일 가능성
+                    is_session_issue = True
+                    logger.info("빈 응답 감지 - 세션 만료로 판단")
+                elif "LOGOUT" in response_text.upper():
+                    is_session_issue = True
+                    logger.info("LOGOUT 감지 - 세션 만료로 판단")
+
+                if is_session_issue:
+                    raise KRXSessionExpiredError(f"세션 만료: {response_text}")
+                else:
+                    # 세션 문제가 아닌 400 에러 (잘못된 파라미터 등)
+                    raise KRXDataError(f"API 요청 실패 (400): {response_text}")
             raise KRXDataError(f"API 요청 실패: {e}")
         except requests.exceptions.RequestException as e:
             raise KRXDataError(f"API 요청 실패: {e}")
