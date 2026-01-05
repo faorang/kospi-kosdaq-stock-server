@@ -190,6 +190,10 @@ class KakaoAuthManager:
         # 새 형식 파일 시도
         if self.COOKIE_PATH.exists():
             try:
+                # 파일 수정 시간도 확인 (race condition 대응)
+                file_mtime = datetime.fromtimestamp(self.COOKIE_PATH.stat().st_mtime)
+                file_is_fresh = datetime.now() - file_mtime < self.VALIDATION_SKIP_THRESHOLD
+
                 data = json.loads(self.COOKIE_PATH.read_text())
                 cookies = data.get("cookies", {})
                 last_login_str = data.get("last_login")
@@ -209,9 +213,13 @@ class KakaoAuthManager:
                             last_login=last_login
                         )
 
-                        # 마지막 검증 시간 로드
+                        # 마지막 검증 시간 로드 (파일 수정 시간으로 대체 가능)
                         if last_validated_str:
                             self._last_validated = datetime.fromisoformat(last_validated_str)
+                        elif file_is_fresh:
+                            # last_validated 없어도 파일이 최근 수정됐으면 신뢰
+                            self._last_validated = file_mtime
+                            logger.info(f"파일 수정 시간으로 세션 신뢰: {file_mtime}")
 
                         logger.info("저장된 세션을 로드했습니다.")
                         return True
