@@ -1506,20 +1506,20 @@ class KRXDataClient:
 
         df = DataFrame(items)
 
-        # 컬럼 매핑
+        # 컬럼 매핑 (pykrx 호환 영문 컬럼명)
         column_map = {
-            "ISU_SRT_CD": "티커",
-            "TDD_OPNPRC": "시가",
-            "TDD_HGPRC": "고가",
-            "TDD_LWPRC": "저가",
-            "TDD_CLSPRC": "종가",
-            "ACC_TRDVOL": "거래량",
-            "ACC_TRDVAL": "거래대금",
+            "ISU_SRT_CD": "Ticker",
+            "TDD_OPNPRC": "Open",
+            "TDD_HGPRC": "High",
+            "TDD_LWPRC": "Low",
+            "TDD_CLSPRC": "Close",
+            "ACC_TRDVOL": "Volume",
+            "ACC_TRDVAL": "Amount",
         }
         df = df.rename(columns=column_map)
 
         # 숫자 변환
-        numeric_cols = ["시가", "고가", "저가", "종가", "거래량", "거래대금"]
+        numeric_cols = ["Open", "High", "Low", "Close", "Volume", "Amount"]
         for col in numeric_cols:
             if col in df.columns:
                 df[col] = pd.to_numeric(
@@ -1528,11 +1528,11 @@ class KRXDataClient:
                 )
 
         # 티커 인덱스
-        if "티커" in df.columns:
-            df = df.set_index("티커")
+        if "Ticker" in df.columns:
+            df = df.set_index("Ticker")
 
-        # 필요한 컬럼만 반환
-        result_cols = ["시가", "고가", "저가", "종가", "거래량", "거래대금"]
+        # 필요한 컬럼만 반환 (pykrx 호환 영문 컬럼명)
+        result_cols = ["Open", "High", "Low", "Close", "Volume", "Amount"]
         available = [c for c in result_cols if c in df.columns]
 
         return df[available] if available else df
