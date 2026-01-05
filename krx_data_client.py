@@ -414,9 +414,15 @@ class KakaoAuthManager:
         # 기존 세션 체크
         if not force and self._load_session():
             # 최근 검증됐으면 재검증 생략 (다른 프로세스에서 검증한 경우 포함)
-            if self._last_validated and datetime.now() - self._last_validated < self.VALIDATION_SKIP_THRESHOLD:
-                logger.info(f"최근 검증된 세션 사용 (검증 시각: {self._last_validated})")
-                return True
+            now = datetime.now()
+            if self._last_validated:
+                elapsed = now - self._last_validated
+                logger.debug(f"세션 검증 시간 체크: last_validated={self._last_validated}, elapsed={elapsed}, threshold={self.VALIDATION_SKIP_THRESHOLD}")
+                if elapsed < self.VALIDATION_SKIP_THRESHOLD:
+                    logger.info(f"최근 검증된 세션 사용 (검증 시각: {self._last_validated})")
+                    return True
+            else:
+                logger.debug("last_validated가 없음 - 검증 필요")
 
             if self._validate_session():
                 self._update_last_validated()  # 검증 성공 시 파일에 기록
