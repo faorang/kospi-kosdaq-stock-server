@@ -671,10 +671,19 @@ class KRXDataClient:
         return self._auth_manager.session
 
     def _ensure_session(self):
-        """세션 유효성 확인"""
+        """세션 유효성 확인 (freshness 체크로 불필요한 검증 방지)"""
+        global _last_session_check_time
+
+        # 최근에 세션 검증이 성공했으면 생략 (프로세스 내 재사용)
+        if _last_session_check_time and datetime.now() - _last_session_check_time < FRESH_SESSION_THRESHOLD:
+            return  # 최근 검증 성공, 생략
+
         if not self._auth_manager.is_logged_in:
             if not self._auth_manager.login():
                 raise KRXSessionExpiredError("세션을 복구할 수 없습니다.")
+
+        # 검증 성공 시간 기록
+        _last_session_check_time = datetime.now()
 
     def _request(
         self,
@@ -1670,6 +1679,10 @@ class KRXDataClient:
 
 # 싱글톤 클라이언트 (lazy initialization)
 _default_client: Optional[KRXDataClient] = None
+_last_session_check_time: Optional[datetime] = None
+
+# 세션 검증 생략 임계값 (이 시간 내에 검증했으면 재검증 생략)
+FRESH_SESSION_THRESHOLD = timedelta(minutes=5)
 
 
 def _get_client() -> KRXDataClient:
@@ -1678,6 +1691,58 @@ def _get_client() -> KRXDataClient:
     if _default_client is None:
         _default_client = KRXDataClient()
     return _default_client
+
+
+def ensure_session_valid() -> bool:
+    """
+    세션 유효성 확인 및 프리워밍 (orchestrator 시작 시 호출 권장)
+
+    이 함수를 orchestrator 시작 시 한 번 호출하면:
+    1. 세션이 없으면 로그인 (카카오 알림 1회)
+    2. 세션이 있고 유효하면 그대로 사용
+    3. 이후 FRESH_SESSION_THRESHOLD 동안 재검증 생략
+
+    Returns:
+        세션 유효 여부
+    """
+    global _last_session_check_time
+
+    # 최근에 검증했으면 생략
+    if _last_session_check_time and datetime.now() - _last_session_check_time < FRESH_SESSION_THRESHOLD:
+        logger.debug(f"세션 최근 검증됨 ({_last_session_check_time}), 생략")
+        return True
+
+    try:
+        client = _get_client()
+        # 세션이 이미 로그인된 상태면 성공
+        if client._auth_manager.is_logged_in:
+            _last_session_check_time = datetime.now()
+            logger.info("세션 프리워밍 완료 (기존 세션 사용)")
+            return True
+
+        # 세션 검증 및 필요시 로그인
+        result = client._auth_manager.check_session()
+        if result:
+            _last_session_check_time = datetime.now()
+            logger.info("세션 프리워밍 완료 (세션 검증/로그인)")
+        return result
+    except Exception as e:
+        logger.error(f"세션 프리워밍 실패: {e}")
+        return False
+
+
+def is_session_fresh() -> bool:
+    """세션이 최근에 검증되어 재검증이 불필요한지 확인"""
+    global _last_session_check_time
+    if _last_session_check_time is None:
+        return False
+    return datetime.now() - _last_session_check_time < FRESH_SESSION_THRESHOLD
+
+
+def reset_session_freshness():
+    """세션 freshness 리셋 (테스트용)"""
+    global _last_session_check_time
+    _last_session_check_time = None
 
 
 # pykrx.stock.stock_api 호환 함수들
