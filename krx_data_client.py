@@ -752,6 +752,8 @@ class KRXDataClient:
     """
 
     API_URL = "http://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
+    ISIN_CACHE_PATH = Path.home() / ".krx_isin_cache.json"  # ISIN 캐시 파일
+    ISIN_CACHE_TTL = timedelta(hours=12)  # 캐시 유효 시간
 
     # bld 파라미터 (pykrx 분석 결과)
     BLD = {
@@ -965,11 +967,63 @@ class KRXDataClient:
 
         return DataFrame(items)
 
+    def _load_isin_cache(self) -> bool:
+        """파일에서 ISIN 캐시 로드"""
+        try:
+            if not self.ISIN_CACHE_PATH.exists():
+                return False
+
+            data = json.loads(self.ISIN_CACHE_PATH.read_text())
+            cache_date = data.get("date")
+            cache_time_str = data.get("cached_at")
+            cache = data.get("cache", {})
+
+            if not cache_date or not cache_time_str or not cache:
+                return False
+
+            # TTL 체크
+            cached_at = datetime.fromisoformat(cache_time_str)
+            if datetime.now() - cached_at > self.ISIN_CACHE_TTL:
+                logger.debug("ISIN 캐시 만료 (TTL 초과)")
+                return False
+
+            self._isin_cache = cache
+            self._isin_cache_date = cache_date
+            logger.debug(f"ISIN 캐시 파일에서 로드: {len(cache)}개 종목 (날짜: {cache_date})")
+            return True
+
+        except Exception as e:
+            logger.warning(f"ISIN 캐시 로드 실패: {e}")
+            return False
+
+    def _save_isin_cache(self, date: str):
+        """ISIN 캐시를 파일에 저장"""
+        try:
+            data = {
+                "date": date,
+                "cached_at": datetime.now().isoformat(),
+                "cache": self._isin_cache
+            }
+            self.ISIN_CACHE_PATH.write_text(json.dumps(data, ensure_ascii=False))
+            logger.debug(f"ISIN 캐시 파일 저장: {len(self._isin_cache)}개 종목")
+        except Exception as e:
+            logger.warning(f"ISIN 캐시 저장 실패: {e}")
+
     def _build_isin_cache(self, date: str):
-        """ISIN 캐시 구축"""
+        """ISIN 캐시 구축 (메모리 → 파일 → API 순서로 확인)"""
+        # 1. 메모리 캐시 확인
         if self._isin_cache and self._isin_cache_date == date:
             return
 
+        # 2. 파일 캐시 확인
+        if self._load_isin_cache():
+            if self._isin_cache_date == date:
+                return
+            # 날짜가 다르면 재구축 필요
+            logger.debug(f"ISIN 캐시 날짜 불일치: {self._isin_cache_date} vs {date}")
+
+        # 3. API에서 새로 구축
+        logger.info(f"ISIN 캐시 구축 중... (날짜: {date})")
         items = self._request(
             self.BLD["fundamental_all"],
             {"mktId": "ALL", "trdDd": date}
@@ -984,6 +1038,9 @@ class KRXDataClient:
 
         self._isin_cache_date = date
         logger.info(f"ISIN 캐시 구축 완료: {len(self._isin_cache)}개 종목")
+
+        # 파일에 저장 (다른 프로세스가 재사용 가능)
+        self._save_isin_cache(date)
 
     def _get_isin(self, ticker: str, date: str) -> Optional[str]:
         """ticker에서 ISIN 조회"""
