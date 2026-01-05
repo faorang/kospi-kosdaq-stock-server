@@ -29,6 +29,7 @@ import logging
 import asyncio
 import functools
 import time
+import fcntl
 from datetime import datetime, timedelta, date
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Callable, TypeVar
@@ -121,10 +122,12 @@ class KakaoAuthManager:
     - 2차인증 상태 체크 및 에러 발생
     - 세션 쿠키 저장/로드
     - 세션 만료 체크 및 자동 갱신
+    - 파일 락을 통한 동시 로그인 방지
     """
 
     COOKIE_PATH = Path.home() / ".krx_session.json"
     LEGACY_COOKIE_PATH = Path.home() / ".krx_cookies.json"  # 기존 쿠키 파일
+    LOCK_PATH = Path.home() / ".krx_session.lock"  # 로그인 락 파일
     SESSION_TIMEOUT = timedelta(hours=4)  # 세션 타임아웃 (보수적 설정)
     SESSION_REFRESH_THRESHOLD = timedelta(hours=3)  # 이 시간 이후면 선제적 갱신
     VALIDATION_SKIP_THRESHOLD = timedelta(minutes=5)  # 이 시간 내 검증됐으면 재검증 생략
@@ -133,6 +136,7 @@ class KakaoAuthManager:
     PAGE_LOAD_TIMEOUT = 60000  # 60초
     LOGIN_WAIT_TIMEOUT = 30000  # 30초
     MAX_LOGIN_RETRIES = 3  # 로그인 재시도 횟수
+    LOCK_WAIT_TIMEOUT = 120  # 락 대기 타임아웃 (초) - 로그인에 2분 이상 걸릴 수 있음
 
     def __init__(
         self,
@@ -398,9 +402,37 @@ class KakaoAuthManager:
             logger.warning(f"세션 검증 실패: {e}")
             return False
 
+    def _acquire_lock(self, lock_file, timeout: float) -> bool:
+        """
+        파일 락 획득 시도 (타임아웃 포함)
+
+        Args:
+            lock_file: 락 파일 핸들
+            timeout: 타임아웃 (초)
+
+        Returns:
+            락 획득 성공 여부
+        """
+        start_time = time.time()
+        while True:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return True
+            except BlockingIOError:
+                # 다른 프로세스가 락을 보유 중
+                elapsed = time.time() - start_time
+                if elapsed >= timeout:
+                    logger.warning(f"락 획득 타임아웃 ({timeout}초)")
+                    return False
+                logger.debug(f"락 대기 중... ({elapsed:.1f}초)")
+                time.sleep(1)  # 1초 간격으로 재시도
+            except Exception as e:
+                logger.warning(f"락 획득 실패: {e}")
+                return False
+
     def login(self, force: bool = False) -> bool:
         """
-        카카오 로그인 (자동 재시도 포함)
+        카카오 로그인 (자동 재시도 포함, 파일 락으로 동시 로그인 방지)
 
         Args:
             force: True면 기존 세션 무시하고 재로그인
@@ -411,7 +443,7 @@ class KakaoAuthManager:
         Raises:
             KRX2FARequiredError: 2차인증이 활성화된 경우
         """
-        # 기존 세션 체크
+        # 기존 세션 체크 (락 없이)
         if not force and self._load_session():
             # 최근 검증됐으면 재검증 생략 (다른 프로세스에서 검증한 경우 포함)
             now = datetime.now()
@@ -429,33 +461,75 @@ class KakaoAuthManager:
                 logger.info("기존 세션이 유효합니다.")
                 return True
             logger.info("기존 세션이 만료되어 재로그인합니다.")
-            self._cleanup_session_files()
 
-        # Playwright로 로그인 (재시도 로직 포함)
-        last_error = None
-        for attempt in range(self.MAX_LOGIN_RETRIES):
+        # 재로그인이 필요한 경우, 파일 락을 획득하여 동시 로그인 방지
+        return self._login_with_lock(force)
+
+    def _login_with_lock(self, force: bool = False) -> bool:
+        """파일 락을 사용한 로그인 (동시 로그인 방지)"""
+        # 락 파일 생성/열기
+        self.LOCK_PATH.touch(exist_ok=True)
+
+        with open(self.LOCK_PATH, 'w') as lock_file:
+            logger.debug("로그인 락 획득 시도...")
+
+            if not self._acquire_lock(lock_file, self.LOCK_WAIT_TIMEOUT):
+                # 락 획득 실패 - 타임아웃
+                raise KRXAuthError("로그인 락 획득 타임아웃 - 다른 프로세스가 로그인 중일 수 있음")
+
+            logger.debug("로그인 락 획득 성공")
+
             try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    result = loop.run_until_complete(self._login_async())
-                    if result:
-                        return True
-                finally:
-                    loop.close()
-            except KRX2FARequiredError:
-                # 2FA 에러는 재시도해도 의미 없음
-                raise
-            except Exception as e:
-                last_error = e
-                logger.warning(f"로그인 시도 {attempt + 1}/{self.MAX_LOGIN_RETRIES} 실패: {e}")
-                if attempt < self.MAX_LOGIN_RETRIES - 1:
-                    wait_time = (attempt + 1) * 5  # 5초, 10초, 15초...
-                    logger.info(f"{wait_time}초 후 재시도...")
-                    time.sleep(wait_time)
-                    self._cleanup_session_files()
+                # 락 획득 후 다시 세션 체크 (다른 프로세스가 로그인했을 수 있음)
+                if not force and self._load_session():
+                    now = datetime.now()
+                    if self._last_validated:
+                        elapsed = now - self._last_validated
+                        if elapsed < self.VALIDATION_SKIP_THRESHOLD:
+                            logger.info(f"다른 프로세스가 로그인 완료 - 세션 재사용 (검증 시각: {self._last_validated})")
+                            return True
 
-        raise KRXAuthError(f"로그인 실패 (최대 재시도 횟수 초과): {last_error}")
+                    if self._validate_session():
+                        self._update_last_validated()
+                        logger.info("다른 프로세스가 로그인 완료 - 세션 유효")
+                        return True
+
+                # 세션 파일 정리 후 로그인
+                self._cleanup_session_files()
+
+                # Playwright로 로그인 (재시도 로직 포함)
+                last_error = None
+                for attempt in range(self.MAX_LOGIN_RETRIES):
+                    try:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            result = loop.run_until_complete(self._login_async())
+                            if result:
+                                return True
+                        finally:
+                            loop.close()
+                    except KRX2FARequiredError:
+                        # 2FA 에러는 재시도해도 의미 없음
+                        raise
+                    except Exception as e:
+                        last_error = e
+                        logger.warning(f"로그인 시도 {attempt + 1}/{self.MAX_LOGIN_RETRIES} 실패: {e}")
+                        if attempt < self.MAX_LOGIN_RETRIES - 1:
+                            wait_time = (attempt + 1) * 5  # 5초, 10초, 15초...
+                            logger.info(f"{wait_time}초 후 재시도...")
+                            time.sleep(wait_time)
+                            self._cleanup_session_files()
+
+                raise KRXAuthError(f"로그인 실패 (최대 재시도 횟수 초과): {last_error}")
+
+            finally:
+                # 락 해제 (with 문 종료 시 자동 해제되지만 명시적으로)
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                    logger.debug("로그인 락 해제")
+                except:
+                    pass
 
     async def _login_async(self) -> bool:
         """비동기 로그인 처리"""
