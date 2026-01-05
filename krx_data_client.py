@@ -204,9 +204,13 @@ class KakaoAuthManager:
 
                     # 타임아웃 체크
                     if datetime.now() - last_login <= self.SESSION_TIMEOUT:
-                        # 세션에 쿠키 적용
+                        # 세션에 쿠키 적용 (domain 필수!)
                         for name, value in cookies.items():
-                            self.session.cookies.set(name, value)
+                            self.session.cookies.set(
+                                name, value,
+                                domain="data.krx.co.kr",
+                                path="/"
+                            )
 
                         self._session_info = SessionInfo(
                             cookies=cookies,
@@ -235,9 +239,13 @@ class KakaoAuthManager:
                 if isinstance(cookies_list, list) and cookies_list:
                     cookies = {c["name"]: c["value"] for c in cookies_list}
 
-                    # 세션에 쿠키 적용
+                    # 세션에 쿠키 적용 (domain 필수!)
                     for name, value in cookies.items():
-                        self.session.cookies.set(name, value)
+                        self.session.cookies.set(
+                            name, value,
+                            domain="data.krx.co.kr",
+                            path="/"
+                        )
 
                     self._session_info = SessionInfo(
                         cookies=cookies,
