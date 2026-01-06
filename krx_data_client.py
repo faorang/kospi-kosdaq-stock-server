@@ -2,20 +2,27 @@
 KRX Data Client - 통합 주식 데이터 클라이언트
 
 pykrx와 동일한 인터페이스로 KRX Data Marketplace에서 데이터를 조회합니다.
-카카오 로그인이 필요하며, 2차인증은 비활성화되어 있어야 합니다.
+KRX 직접 로그인 또는 카카오 SNS 로그인을 지원하며, 카카오 로그인 시 2차인증은 비활성화되어 있어야 합니다.
 
 아키텍처:
-- KakaoAuthManager: 카카오 로그인 관리, 세션 유지, 자동 재로그인
+- KRXAuthManager: KRX/카카오 로그인 관리, 세션 유지, 자동 재로그인
 - KRXDataClient: 실제 데이터 조회 API
 
 환경변수:
-    KAKAO_ID: 카카오 아이디
-    KAKAO_PW: 카카오 비밀번호
+    KRX_LOGIN_METHOD: 로그인 방식 ("krx" 또는 "kakao", 기본값: "krx")
+    KRX_ID: KRX 직접 로그인 아이디 (KRX_LOGIN_METHOD="krx" 일 때 필요, 기본값)
+    KRX_PW: KRX 직접 로그인 비밀번호 (KRX_LOGIN_METHOD="krx" 일 때 필요, 기본값)
+    KAKAO_ID: 카카오 아이디 (KRX_LOGIN_METHOD="kakao" 일 때 필요)
+    KAKAO_PW: 카카오 비밀번호 (KRX_LOGIN_METHOD="kakao" 일 때 필요)
 
 사용법:
     from krx_data_client import KRXDataClient
 
+    # KRX 직접 로그인 (환경변수: KRX_LOGIN_METHOD=krx, KRX_ID, KRX_PW)
     client = KRXDataClient()
+
+    # 또는 카카오 로그인 (환경변수: KAKAO_ID, KAKAO_PW)
+    client = KRXDataClient(login_method="kakao")
 
     # pykrx와 동일한 인터페이스
     df = client.get_market_ohlcv("20240101", "20240131", "005930")
@@ -114,12 +121,12 @@ def retry_on_session_expired(max_retries: int = 3, delay: float = 1.0):
     return decorator
 
 
-class KakaoAuthManager:
+class KRXAuthManager:
     """
-    카카오 로그인 관리자
+    KRX 인증 관리자
 
-    - 카카오 로그인/로그아웃
-    - 2차인증 상태 체크 및 에러 발생
+    - KRX 직접 로그인 또는 카카오 SNS 로그인 지원
+    - 2차인증 상태 체크 및 에러 발생 (카카오 로그인 시)
     - 세션 쿠키 저장/로드
     - 세션 만료 체크 및 자동 갱신
     - 파일 락을 통한 동시 로그인 방지
@@ -142,10 +149,22 @@ class KakaoAuthManager:
         self,
         kakao_id: Optional[str] = None,
         kakao_pw: Optional[str] = None,
+        krx_id: Optional[str] = None,
+        krx_pw: Optional[str] = None,
+        login_method: Optional[str] = None,
         headless: bool = True,
     ):
+        # 로그인 방식 결정 (환경변수 > 파라미터, 기본값: krx)
+        self.login_method = (login_method or os.environ.get("KRX_LOGIN_METHOD", "krx")).lower()
+
+        # 카카오 로그인 정보
         self.kakao_id = kakao_id or os.environ.get("KAKAO_ID")
         self.kakao_pw = kakao_pw or os.environ.get("KAKAO_PW")
+
+        # KRX 직접 로그인 정보
+        self.krx_id = krx_id or os.environ.get("KRX_ID")
+        self.krx_pw = krx_pw or os.environ.get("KRX_PW")
+
         self.headless = headless
 
         self._session: Optional[requests.Session] = None
@@ -154,11 +173,19 @@ class KakaoAuthManager:
         self._browser = None
         self._playwright = None
 
-        if not self.kakao_id or not self.kakao_pw:
-            raise KRXAuthError(
-                "카카오 로그인 정보가 필요합니다.\n"
-                "KAKAO_ID, KAKAO_PW 환경변수를 설정하세요."
-            )
+        # 로그인 방식에 따른 필수 정보 검증
+        if self.login_method == "krx":
+            if not self.krx_id or not self.krx_pw:
+                raise KRXAuthError(
+                    "KRX 직접 로그인 정보가 필요합니다.\n"
+                    "KRX_ID, KRX_PW 환경변수를 설정하세요."
+                )
+        else:  # kakao (기본값)
+            if not self.kakao_id or not self.kakao_pw:
+                raise KRXAuthError(
+                    "카카오 로그인 정보가 필요합니다.\n"
+                    "KAKAO_ID, KAKAO_PW 환경변수를 설정하세요."
+                )
 
     @property
     def is_logged_in(self) -> bool:
@@ -432,7 +459,11 @@ class KakaoAuthManager:
 
     def login(self, force: bool = False) -> bool:
         """
-        카카오 로그인 (자동 재시도 포함, 파일 락으로 동시 로그인 방지)
+        KRX 로그인 (자동 재시도 포함, 파일 락으로 동시 로그인 방지)
+
+        로그인 방식은 login_method 속성에 따라 결정됩니다:
+        - "krx": KRX 직접 ID/PW 로그인
+        - "kakao": 카카오 SNS 로그인 (기본값)
 
         Args:
             force: True면 기존 세션 무시하고 재로그인
@@ -441,7 +472,7 @@ class KakaoAuthManager:
             로그인 성공 여부
 
         Raises:
-            KRX2FARequiredError: 2차인증이 활성화된 경우
+            KRX2FARequiredError: 카카오 로그인 시 2차인증이 활성화된 경우
         """
         # 기존 세션 체크 (락 없이)
         if not force and self._load_session():
@@ -497,6 +528,10 @@ class KakaoAuthManager:
                 # 세션 파일 정리 후 로그인
                 self._cleanup_session_files()
 
+                # 로그인 방식 선택
+                login_method_name = "KRX 직접" if self.login_method == "krx" else "카카오"
+                logger.info(f"{login_method_name} 로그인 시작...")
+
                 # Playwright로 로그인 (재시도 로직 포함)
                 last_error = None
                 for attempt in range(self.MAX_LOGIN_RETRIES):
@@ -504,13 +539,17 @@ class KakaoAuthManager:
                         loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(loop)
                         try:
-                            result = loop.run_until_complete(self._login_async())
+                            # 로그인 방식에 따라 다른 메서드 호출
+                            if self.login_method == "krx":
+                                result = loop.run_until_complete(self._login_async_krx())
+                            else:
+                                result = loop.run_until_complete(self._login_async_kakao())
                             if result:
                                 return True
                         finally:
                             loop.close()
                     except KRX2FARequiredError:
-                        # 2FA 에러는 재시도해도 의미 없음
+                        # 2FA 에러는 재시도해도 의미 없음 (카카오 로그인만 해당)
                         raise
                     except Exception as e:
                         last_error = e
@@ -531,8 +570,8 @@ class KakaoAuthManager:
                 except:
                     pass
 
-    async def _login_async(self) -> bool:
-        """비동기 로그인 처리"""
+    async def _login_async_kakao(self) -> bool:
+        """비동기 카카오 SNS 로그인 처리"""
         try:
             from playwright.async_api import async_playwright
         except ImportError:
@@ -696,8 +735,165 @@ class KakaoAuthManager:
         except KRX2FARequiredError:
             raise
         except Exception as e:
-            logger.error(f"로그인 실패: {e}")
-            raise KRXAuthError(f"로그인 실패: {e}")
+            logger.error(f"카카오 로그인 실패: {e}")
+            raise KRXAuthError(f"카카오 로그인 실패: {e}")
+        finally:
+            await self._cleanup_browser()
+
+    async def _login_async_krx(self) -> bool:
+        """비동기 KRX 직접 ID/PW 로그인 처리"""
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            raise KRXAuthError(
+                "playwright가 설치되지 않았습니다.\n"
+                "'pip install playwright && playwright install chromium'을 실행하세요."
+            )
+
+        self._playwright = await async_playwright().start()
+        self._browser = await self._playwright.chromium.launch(headless=self.headless)
+
+        context = await self._browser.new_context(
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/120.0.0.0 Safari/537.36",
+            viewport={"width": 1920, "height": 1080},
+            locale="ko-KR",
+        )
+
+        page = await context.new_page()
+
+        try:
+            # KRX 로그인 페이지로 이동
+            login_url = "https://data.krx.co.kr/contents/MDC/COMS/client/MDCCOMS001.cmd"
+            await page.goto(login_url, wait_until="networkidle", timeout=self.PAGE_LOAD_TIMEOUT)
+            await asyncio.sleep(2)
+
+            # iframe에서 로그인 폼 접근
+            iframe = await page.query_selector('iframe')
+            if not iframe:
+                raise KRXAuthError("로그인 iframe을 찾을 수 없습니다.")
+
+            frame = await iframe.content_frame()
+
+            # KRX 아이디 입력 (iframe 내 #mbrId)
+            id_input = await frame.wait_for_selector('#mbrId', timeout=self.LOGIN_WAIT_TIMEOUT)
+            await id_input.fill(self.krx_id)
+            await asyncio.sleep(0.3)
+
+            # 비밀번호 입력 (iframe 내 input[name="pw"])
+            pw_input = await frame.wait_for_selector('input[name="pw"]', timeout=self.LOGIN_WAIT_TIMEOUT)
+            await pw_input.fill(self.krx_pw)
+            await asyncio.sleep(0.3)
+
+            # 로그인 버튼 클릭 (iframe 내 a.jsLoginBtn)
+            login_btn = await frame.wait_for_selector('a.jsLoginBtn', timeout=self.LOGIN_WAIT_TIMEOUT)
+            await login_btn.click()
+            logger.info("KRX 로그인 버튼 클릭됨")
+
+            # 로그인 결과 대기 (최대 60초)
+            krx_redirected = False
+            for i in range(60):
+                await asyncio.sleep(1)
+                current_url = page.url
+
+                # KRX 메인 페이지로 리다이렉트 성공 (로그인 페이지가 아닌 경우)
+                if "MDCCOMS001" not in current_url and (
+                    current_url.startswith("http://data.krx.co.kr") or
+                    current_url.startswith("https://data.krx.co.kr")
+                ):
+                    logger.info("KRX 직접 로그인 성공!")
+                    krx_redirected = True
+                    break
+
+                if i % 10 == 0:
+                    logger.info(f"로그인 처리 대기 중... ({i}초)")
+
+                # 마케팅 동의 팝업 처리 (있을 경우 '동의하지 않음' 선택)
+                try:
+                    # iframe 다시 접근 (페이지가 새로고침될 수 있음)
+                    iframe = await page.query_selector('iframe')
+                    if iframe:
+                        frame = await iframe.content_frame()
+                        # 마케팅 동의 거부 체크박스
+                        disagree_checkbox = await frame.query_selector('#isUseRuleOk3_N')
+                        if disagree_checkbox:
+                            is_checked = await disagree_checkbox.is_checked()
+                            if not is_checked:
+                                await disagree_checkbox.click()
+                                logger.info("마케팅 동의 거부 선택")
+                                await asyncio.sleep(0.5)
+
+                        # 확인 버튼 클릭 (있을 경우)
+                        confirm_btn = await frame.query_selector('button:has-text("확인"), a:has-text("확인")')
+                        if confirm_btn:
+                            await confirm_btn.click()
+                            logger.info("확인 버튼 클릭")
+                            await asyncio.sleep(1)
+                except:
+                    pass
+
+                # "이미 로그인된 계정" 팝업 처리
+                try:
+                    iframe = await page.query_selector('iframe')
+                    if iframe:
+                        frame = await iframe.content_frame()
+                        # 알림 팝업의 확인 버튼
+                        alert_confirm = await frame.query_selector('.ms-alert-btn, .ms-confirm-btn, button.confirm')
+                        if alert_confirm:
+                            await alert_confirm.click()
+                            logger.info("알림 팝업 확인 버튼 클릭")
+                            await asyncio.sleep(1)
+                except:
+                    pass
+
+            # 로그인 성공 확인
+            if not krx_redirected:
+                current_url = page.url
+                await self._cleanup_browser()
+                raise KRXAuthError(
+                    f"KRX 직접 로그인 실패. 아이디/비밀번호를 확인하세요.\n"
+                    f"현재 URL: {current_url[:100]}..."
+                )
+
+            # 쿠키 추출 및 저장
+            cookies = await context.cookies()
+            cookie_dict = {}
+            krx_cookies = []
+
+            # KRX 관련 쿠키만 필터링 및 적용
+            for cookie in cookies:
+                name = cookie["name"]
+                value = cookie["value"]
+                domain = cookie.get("domain", "")
+                path = cookie.get("path", "/")
+
+                # KRX 도메인 쿠키만 저장
+                if "krx.co.kr" in domain:
+                    logger.debug(f"KRX 쿠키 발견: {name}={value[:20]}..., domain={domain}")
+                    self.session.cookies.set(
+                        name, value,
+                        domain=domain,
+                        path=path
+                    )
+                    cookie_dict[name] = value
+                    krx_cookies.append({"name": name, "value": value, "domain": domain, "path": path})
+
+            logger.info(f"KRX 쿠키 {len(krx_cookies)}개 저장됨")
+
+            self._session_info = SessionInfo(
+                cookies=cookie_dict,
+                last_login=datetime.now()
+            )
+
+            self._save_session(cookie_dict, krx_cookies=krx_cookies)
+
+            logger.info("KRX 직접 로그인 성공")
+            return True
+
+        except Exception as e:
+            logger.error(f"KRX 직접 로그인 실패: {e}")
+            raise KRXAuthError(f"KRX 직접 로그인 실패: {e}")
         finally:
             await self._cleanup_browser()
 
@@ -744,11 +940,20 @@ class KakaoAuthManager:
         return True
 
 
+# 하위 호환성을 위한 별칭 (기존 코드에서 KakaoAuthManager를 참조하는 경우)
+KakaoAuthManager = KRXAuthManager
+
+
 class KRXDataClient:
     """
     KRX 데이터 클라이언트
 
     pykrx와 동일한 인터페이스로 KRX Data Marketplace에서 데이터를 조회합니다.
+    KRX 직접 로그인 또는 카카오 SNS 로그인을 지원합니다.
+
+    환경변수로 로그인 정보를 설정하는 방법:
+    - KRX 직접 로그인: KRX_ID, KRX_PW (기본값)
+    - 카카오 로그인: KRX_LOGIN_METHOD=kakao, KAKAO_ID, KAKAO_PW
     """
 
     API_URL = "http://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
@@ -791,6 +996,9 @@ class KRXDataClient:
         self,
         kakao_id: Optional[str] = None,
         kakao_pw: Optional[str] = None,
+        krx_id: Optional[str] = None,
+        krx_pw: Optional[str] = None,
+        login_method: Optional[str] = None,
         headless: bool = True,
         auto_login: bool = True,
     ):
@@ -798,14 +1006,20 @@ class KRXDataClient:
         클라이언트 초기화
 
         Args:
-            kakao_id: 카카오 아이디
-            kakao_pw: 카카오 비밀번호
+            kakao_id: 카카오 아이디 (login_method="kakao" 일 때 필요)
+            kakao_pw: 카카오 비밀번호 (login_method="kakao" 일 때 필요)
+            krx_id: KRX 직접 로그인 아이디 (login_method="krx" 일 때 필요)
+            krx_pw: KRX 직접 로그인 비밀번호 (login_method="krx" 일 때 필요)
+            login_method: 로그인 방식 ("krx" 또는 "kakao", 기본값: "krx")
             headless: 헤드리스 브라우저 모드
             auto_login: 자동 로그인 여부
         """
-        self._auth_manager = KakaoAuthManager(
+        self._auth_manager = KRXAuthManager(
             kakao_id=kakao_id,
             kakao_pw=kakao_pw,
+            krx_id=krx_id,
+            krx_pw=krx_pw,
+            login_method=login_method,
             headless=headless,
         )
 
