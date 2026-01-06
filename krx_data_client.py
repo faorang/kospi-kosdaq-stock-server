@@ -815,7 +815,14 @@ class KRXAuthManager:
             home_url = "https://data.krx.co.kr/contents/MDC/MAIN/main/index.cmd"
             logger.info(f"홈 페이지로 이동하여 로그인 상태 확인: {home_url}")
             await page.goto(home_url, wait_until="networkidle", timeout=self.PAGE_LOAD_TIMEOUT)
-            await asyncio.sleep(5)  # mdc.client_session 쿠키 설정 대기
+            await asyncio.sleep(2)
+
+            # 데이터 조회 페이지로 이동하여 mdc.client_session 쿠키 발급 유도
+            # (mdc.client_session 쿠키는 데이터 조회 페이지에서만 발급됨)
+            data_page_url = "https://data.krx.co.kr/contents/MDC/MDI/mdiLoader/index.cmd?menuId=MDC0201010105"
+            logger.info(f"데이터 조회 페이지로 이동하여 mdc.client_session 쿠키 발급: {data_page_url}")
+            await page.goto(data_page_url, wait_until="networkidle", timeout=self.PAGE_LOAD_TIMEOUT)
+            await asyncio.sleep(3)  # mdc.client_session 쿠키 설정 대기
 
             # 로그인 상태 확인 (로그인 페이지로 리다이렉트되면 실패)
             current_url = page.url
@@ -838,41 +845,69 @@ class KRXAuthManager:
                     f"현재 URL: {current_url[:100]}..."
                 )
 
-            # 쿠키 추출 및 저장
-            # 1. Playwright context에서 쿠키 가져오기
-            cookies = await context.cookies(["https://data.krx.co.kr"])
+            # 쿠키 추출 및 저장 (재시도 로직 포함)
+            cookies = []
+            max_cookie_retries = 3
+
+            for retry in range(max_cookie_retries):
+                cookies = []
+
+                # 1. Playwright context에서 쿠키 가져오기
+                context_cookies = await context.cookies(["https://data.krx.co.kr"])
+                cookies.extend(context_cookies)
+
+                # 디버깅: context 쿠키 출력
+                context_cookie_info = [(c["name"], c.get("domain", "")) for c in context_cookies]
+                logger.info(f"[시도 {retry+1}/{max_cookie_retries}] Context 쿠키 {len(context_cookies)}개: {context_cookie_info}")
+
+                # 2. JavaScript로 document.cookie에서 쿠키 가져오기 (mdc.client_session 포함)
+                js_cookies_str = await page.evaluate("document.cookie")
+                logger.info(f"[시도 {retry+1}/{max_cookie_retries}] JavaScript 쿠키: {js_cookies_str}")
+
+                # JavaScript 쿠키 파싱
+                if js_cookies_str:
+                    for cookie_pair in js_cookies_str.split(';'):
+                        cookie_pair = cookie_pair.strip()
+                        if '=' in cookie_pair:
+                            name, value = cookie_pair.split('=', 1)
+                            name = name.strip()
+                            value = value.strip()
+                            if name and value:
+                                # 중복 방지
+                                if not any(c["name"] == name for c in cookies):
+                                    cookies.append({
+                                        "name": name,
+                                        "value": value,
+                                        "domain": "data.krx.co.kr",
+                                        "path": "/"
+                                    })
+                                    logger.info(f"JS에서 추가 쿠키 발견: {name}")
+
+                all_cookie_names = [c["name"] for c in cookies]
+                logger.info(f"[시도 {retry+1}/{max_cookie_retries}] 총 {len(cookies)}개 쿠키: {all_cookie_names}")
+
+                # mdc.client_session 쿠키가 있으면 성공
+                if "mdc.client_session" in all_cookie_names:
+                    logger.info("mdc.client_session 쿠키 확인됨!")
+                    break
+
+                # 마지막 시도가 아니면 페이지 새로고침 후 재시도
+                if retry < max_cookie_retries - 1:
+                    logger.warning(f"mdc.client_session 쿠키 미발견. 페이지 새로고침 후 재시도...")
+                    await page.reload(wait_until="networkidle")
+                    await asyncio.sleep(3)
+
+            # mdc.client_session이 없으면 경고 (API 호출 실패할 수 있음)
+            final_cookie_names = [c["name"] for c in cookies]
+            if "mdc.client_session" not in final_cookie_names:
+                logger.warning(
+                    "⚠️ mdc.client_session 쿠키를 찾지 못했습니다. "
+                    "다른 위치에서 동일 계정으로 로그인된 세션이 있을 수 있습니다. "
+                    "API 호출이 실패할 수 있습니다."
+                )
+
             cookie_dict = {}
             krx_cookies = []
-
-            # 디버깅: context 쿠키 출력
-            context_cookie_info = [(c["name"], c.get("domain", "")) for c in cookies]
-            logger.info(f"Context 쿠키 {len(cookies)}개: {context_cookie_info}")
-
-            # 2. JavaScript로 document.cookie에서 쿠키 가져오기 (mdc.client_session 포함)
-            js_cookies_str = await page.evaluate("document.cookie")
-            logger.info(f"JavaScript 쿠키: {js_cookies_str}")
-
-            # JavaScript 쿠키 파싱
-            if js_cookies_str:
-                for cookie_pair in js_cookies_str.split(';'):
-                    cookie_pair = cookie_pair.strip()
-                    if '=' in cookie_pair:
-                        name, value = cookie_pair.split('=', 1)
-                        name = name.strip()
-                        value = value.strip()
-                        if name and value:
-                            # 중복 방지
-                            if not any(c["name"] == name for c in cookies):
-                                cookies.append({
-                                    "name": name,
-                                    "value": value,
-                                    "domain": "data.krx.co.kr",
-                                    "path": "/"
-                                })
-                                logger.info(f"JS에서 추가 쿠키 발견: {name}")
-
-            all_cookie_info = [(c["name"], c.get("domain", "")) for c in cookies]
-            logger.info(f"총 {len(cookies)}개 쿠키 (context + JS): {all_cookie_info}")
 
             # KRX 관련 쿠키만 필터링 및 적용
             for cookie in cookies:
