@@ -838,14 +838,41 @@ class KRXAuthManager:
                     f"현재 URL: {current_url[:100]}..."
                 )
 
-            # 쿠키 추출 및 저장 (특정 URL에서 쿠키 가져오기)
+            # 쿠키 추출 및 저장
+            # 1. Playwright context에서 쿠키 가져오기
             cookies = await context.cookies(["https://data.krx.co.kr"])
             cookie_dict = {}
             krx_cookies = []
 
-            # 디버깅: 모든 쿠키 이름과 도메인 출력
+            # 디버깅: context 쿠키 출력
+            context_cookie_info = [(c["name"], c.get("domain", "")) for c in cookies]
+            logger.info(f"Context 쿠키 {len(cookies)}개: {context_cookie_info}")
+
+            # 2. JavaScript로 document.cookie에서 쿠키 가져오기 (mdc.client_session 포함)
+            js_cookies_str = await page.evaluate("document.cookie")
+            logger.info(f"JavaScript 쿠키: {js_cookies_str}")
+
+            # JavaScript 쿠키 파싱
+            if js_cookies_str:
+                for cookie_pair in js_cookies_str.split(';'):
+                    cookie_pair = cookie_pair.strip()
+                    if '=' in cookie_pair:
+                        name, value = cookie_pair.split('=', 1)
+                        name = name.strip()
+                        value = value.strip()
+                        if name and value:
+                            # 중복 방지
+                            if not any(c["name"] == name for c in cookies):
+                                cookies.append({
+                                    "name": name,
+                                    "value": value,
+                                    "domain": "data.krx.co.kr",
+                                    "path": "/"
+                                })
+                                logger.info(f"JS에서 추가 쿠키 발견: {name}")
+
             all_cookie_info = [(c["name"], c.get("domain", "")) for c in cookies]
-            logger.info(f"브라우저에서 총 {len(cookies)}개 쿠키 발견: {all_cookie_info}")
+            logger.info(f"총 {len(cookies)}개 쿠키 (context + JS): {all_cookie_info}")
 
             # KRX 관련 쿠키만 필터링 및 적용
             for cookie in cookies:
