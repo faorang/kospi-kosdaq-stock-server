@@ -55,17 +55,34 @@ def _get_krx_client():
 
     _krx_client_initialized = True
 
-    # KAKAO_ID, KAKAO_PW 환경변수 확인
+    # KRX 로그인 환경변수 확인 (KRX 직접 로그인 또는 카카오 로그인)
+    krx_id = os.environ.get("KRX_ID")
+    krx_pw = os.environ.get("KRX_PW")
     kakao_id = os.environ.get("KAKAO_ID")
     kakao_pw = os.environ.get("KAKAO_PW")
+    login_method = os.environ.get("KRX_LOGIN_METHOD", "krx").lower()
 
-    if not kakao_id or not kakao_pw:
-        logger.warning("KAKAO_ID, KAKAO_PW 환경변수가 설정되지 않았습니다.")
-        return None
+    # 로그인 방식에 따른 자격증명 확인
+    if login_method == "krx":
+        if not krx_id or not krx_pw:
+            logger.warning("KRX_LOGIN_METHOD=krx이지만 KRX_ID, KRX_PW 환경변수가 설정되지 않았습니다.")
+            return None
+    else:  # kakao
+        if not kakao_id or not kakao_pw:
+            logger.warning("KRX_LOGIN_METHOD=kakao이지만 KAKAO_ID, KAKAO_PW 환경변수가 설정되지 않았습니다.")
+            return None
 
     try:
         from krx_data_client import KRXDataClient
-        _krx_client = KRXDataClient(headless=True, auto_login=True)
+        _krx_client = KRXDataClient(
+            krx_id=krx_id,
+            krx_pw=krx_pw,
+            kakao_id=kakao_id,
+            kakao_pw=kakao_pw,
+            login_method=login_method,
+            headless=True,
+            auto_login=True
+        )
         logger.info("KRX Data Client 초기화 완료")
     except Exception as e:
         logger.error(f"KRX Data Client 초기화 실패: {e}")
