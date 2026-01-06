@@ -838,12 +838,14 @@ class KRXAuthManager:
                     f"현재 URL: {current_url[:100]}..."
                 )
 
-            # 쿠키 추출 및 저장
-            cookies = await context.cookies()
+            # 쿠키 추출 및 저장 (특정 URL에서 쿠키 가져오기)
+            cookies = await context.cookies(["https://data.krx.co.kr"])
             cookie_dict = {}
             krx_cookies = []
 
-            logger.debug(f"브라우저에서 총 {len(cookies)}개 쿠키 발견")
+            # 디버깅: 모든 쿠키 이름과 도메인 출력
+            all_cookie_info = [(c["name"], c.get("domain", "")) for c in cookies]
+            logger.info(f"브라우저에서 총 {len(cookies)}개 쿠키 발견: {all_cookie_info}")
 
             # KRX 관련 쿠키만 필터링 및 적용
             for cookie in cookies:
@@ -852,12 +854,12 @@ class KRXAuthManager:
                 domain = cookie.get("domain", "")
                 path = cookie.get("path", "/")
 
-                # KRX 도메인 쿠키만 저장
-                if "krx.co.kr" in domain:
+                # KRX 도메인 쿠키 저장 (도메인 체크 완화)
+                if "krx.co.kr" in domain or domain == "":
                     logger.debug(f"KRX 쿠키 발견: {name}={value[:20]}..., domain={domain}")
                     self.session.cookies.set(
                         name, value,
-                        domain=domain,
+                        domain=".krx.co.kr" if domain == "" else domain,
                         path=path
                     )
                     cookie_dict[name] = value
