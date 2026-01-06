@@ -815,7 +815,7 @@ class KRXAuthManager:
             home_url = "https://data.krx.co.kr/contents/MDC/MAIN/main/index.cmd"
             logger.info(f"홈 페이지로 이동하여 로그인 상태 확인: {home_url}")
             await page.goto(home_url, wait_until="networkidle", timeout=self.PAGE_LOAD_TIMEOUT)
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)  # 쿠키 설정 대기 시간 증가
 
             # 로그인 상태 확인 (로그인 페이지로 리다이렉트되면 실패)
             current_url = page.url
@@ -843,6 +843,8 @@ class KRXAuthManager:
             cookie_dict = {}
             krx_cookies = []
 
+            logger.debug(f"브라우저에서 총 {len(cookies)}개 쿠키 발견")
+
             # KRX 관련 쿠키만 필터링 및 적용
             for cookie in cookies:
                 name = cookie["name"]
@@ -861,7 +863,8 @@ class KRXAuthManager:
                     cookie_dict[name] = value
                     krx_cookies.append({"name": name, "value": value, "domain": domain, "path": path})
 
-            logger.info(f"KRX 쿠키 {len(krx_cookies)}개 저장됨")
+            cookie_names = [c["name"] for c in krx_cookies]
+            logger.info(f"KRX 쿠키 {len(krx_cookies)}개 저장됨: {cookie_names}")
 
             self._session_info = SessionInfo(
                 cookies=cookie_dict,
