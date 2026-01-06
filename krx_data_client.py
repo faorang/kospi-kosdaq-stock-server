@@ -793,11 +793,13 @@ class KRXAuthManager:
             # KRX 아이디 입력 (iframe 내 #mbrId)
             id_input = await frame.wait_for_selector('#mbrId', timeout=self.LOGIN_WAIT_TIMEOUT)
             await id_input.fill(self.krx_id)
+            logger.info(f"KRX 아이디 입력 완료: {self.krx_id[:3]}***")
             await asyncio.sleep(0.3)
 
             # 비밀번호 입력 (iframe 내 input[name="pw"])
             pw_input = await frame.wait_for_selector('input[name="pw"]', timeout=self.LOGIN_WAIT_TIMEOUT)
             await pw_input.fill(self.krx_pw)
+            logger.info("KRX 비밀번호 입력 완료")
             await asyncio.sleep(0.3)
 
             # 로그인 버튼 클릭 (iframe 내 a.jsLoginBtn)
@@ -820,8 +822,8 @@ class KRXAuthManager:
                     krx_redirected = True
                     break
 
-                if i % 10 == 0:
-                    logger.info(f"로그인 처리 대기 중... ({i}초)")
+                if i % 5 == 0:
+                    logger.info(f"로그인 처리 대기 중... ({i}초), URL: {current_url[:80]}...")
 
                 # 마케팅 동의 팝업 처리 (있을 경우 '동의하지 않음' 선택)
                 try:
