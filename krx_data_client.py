@@ -593,6 +593,13 @@ class KRXAuthManager:
 
         page = await context.new_page()
 
+        # JavaScript alert/confirm/prompt 다이얼로그 자동 처리
+        async def handle_dialog(dialog):
+            logger.info(f"다이얼로그 감지: {dialog.type} - {dialog.message}")
+            await dialog.accept()
+
+        page.on('dialog', lambda dialog: asyncio.create_task(handle_dialog(dialog)))
+
         try:
             # KRX 로그인 페이지
             login_url = "https://data.krx.co.kr/contents/MDC/COMS/client/MDCCOMS001.cmd"
@@ -762,6 +769,13 @@ class KRXAuthManager:
         )
 
         page = await context.new_page()
+
+        # JavaScript alert/confirm/prompt 다이얼로그 자동 처리
+        async def handle_dialog(dialog):
+            logger.info(f"다이얼로그 감지: {dialog.type} - {dialog.message}")
+            await dialog.accept()
+
+        page.on('dialog', lambda dialog: asyncio.create_task(handle_dialog(dialog)))
 
         try:
             # KRX 로그인 페이지로 이동
