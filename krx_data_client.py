@@ -807,61 +807,27 @@ class KRXAuthManager:
             await login_btn.click()
             logger.info("KRX 로그인 버튼 클릭됨")
 
-            # 로그인 결과 대기 (최대 60초)
+            # 로그인 처리 대기 (3초)
+            await asyncio.sleep(3)
+
+            # KRX 홈 페이지로 명시적 이동하여 로그인 상태 확인
+            # (로그인 성공했어도 로그인 페이지로 리다이렉트되는 KRX 버그 대응)
+            home_url = "https://data.krx.co.kr/contents/MDC/MAIN/main/index.cmd"
+            logger.info(f"홈 페이지로 이동하여 로그인 상태 확인: {home_url}")
+            await page.goto(home_url, wait_until="networkidle", timeout=self.PAGE_LOAD_TIMEOUT)
+            await asyncio.sleep(2)
+
+            # 로그인 상태 확인 (로그인 페이지로 리다이렉트되면 실패)
+            current_url = page.url
             krx_redirected = False
-            for i in range(60):
-                await asyncio.sleep(1)
-                current_url = page.url
 
-                # KRX 메인 페이지로 리다이렉트 성공 (로그인 페이지가 아닌 경우)
-                if "MDCCOMS001" not in current_url and (
-                    current_url.startswith("http://data.krx.co.kr") or
-                    current_url.startswith("https://data.krx.co.kr")
-                ):
-                    logger.info("KRX 직접 로그인 성공!")
-                    krx_redirected = True
-                    break
-
-                if i % 5 == 0:
-                    logger.info(f"로그인 처리 대기 중... ({i}초), URL: {current_url[:80]}...")
-
-                # 마케팅 동의 팝업 처리 (있을 경우 '동의하지 않음' 선택)
-                try:
-                    # iframe 다시 접근 (페이지가 새로고침될 수 있음)
-                    iframe = await page.query_selector('iframe')
-                    if iframe:
-                        frame = await iframe.content_frame()
-                        # 마케팅 동의 거부 체크박스
-                        disagree_checkbox = await frame.query_selector('#isUseRuleOk3_N')
-                        if disagree_checkbox:
-                            is_checked = await disagree_checkbox.is_checked()
-                            if not is_checked:
-                                await disagree_checkbox.click()
-                                logger.info("마케팅 동의 거부 선택")
-                                await asyncio.sleep(0.5)
-
-                        # 확인 버튼 클릭 (있을 경우)
-                        confirm_btn = await frame.query_selector('button:has-text("확인"), a:has-text("확인")')
-                        if confirm_btn:
-                            await confirm_btn.click()
-                            logger.info("확인 버튼 클릭")
-                            await asyncio.sleep(1)
-                except:
-                    pass
-
-                # "이미 로그인된 계정" 팝업 처리
-                try:
-                    iframe = await page.query_selector('iframe')
-                    if iframe:
-                        frame = await iframe.content_frame()
-                        # 알림 팝업의 확인 버튼
-                        alert_confirm = await frame.query_selector('.ms-alert-btn, .ms-confirm-btn, button.confirm')
-                        if alert_confirm:
-                            await alert_confirm.click()
-                            logger.info("알림 팝업 확인 버튼 클릭")
-                            await asyncio.sleep(1)
-                except:
-                    pass
+            if "MDCCOMS001" in current_url:
+                # 로그인 페이지로 리다이렉트됨 = 로그인 실패
+                logger.warning(f"로그인 실패 - 로그인 페이지로 리다이렉트됨: {current_url}")
+            else:
+                # 홈 페이지에 머물러 있음 = 로그인 성공
+                logger.info(f"KRX 직접 로그인 성공! 현재 URL: {current_url}")
+                krx_redirected = True
 
             # 로그인 성공 확인
             if not krx_redirected:
