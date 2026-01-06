@@ -817,6 +817,19 @@ class KRXAuthManager:
             await page.goto(home_url, wait_until="networkidle", timeout=self.PAGE_LOAD_TIMEOUT)
             await asyncio.sleep(2)
 
+            # 홈 페이지에서 먼저 로그인 상태 확인
+            current_url = page.url
+            if "MDCCOMS001" in current_url:
+                # 로그인 페이지로 리다이렉트됨 = 로그인 실패
+                logger.warning(f"로그인 실패 - 홈 페이지에서 로그인 페이지로 리다이렉트됨: {current_url}")
+                await self._cleanup_browser()
+                raise KRXAuthError(
+                    f"KRX 직접 로그인 실패. 아이디/비밀번호를 확인하세요.\n"
+                    f"현재 URL: {current_url[:100]}..."
+                )
+
+            logger.info(f"KRX 직접 로그인 성공! 현재 URL: {current_url}")
+
             # 데이터 조회 페이지로 이동하여 mdc.client_session 쿠키 발급 유도
             # (mdc.client_session 쿠키는 데이터 조회 페이지에서만 발급됨)
             data_page_url = "https://data.krx.co.kr/contents/MDC/MDI/mdiLoader/index.cmd?menuId=MDC0201010105"
@@ -824,26 +837,12 @@ class KRXAuthManager:
             await page.goto(data_page_url, wait_until="networkidle", timeout=self.PAGE_LOAD_TIMEOUT)
             await asyncio.sleep(3)  # mdc.client_session 쿠키 설정 대기
 
-            # 로그인 상태 확인 (로그인 페이지로 리다이렉트되면 실패)
+            # 데이터 조회 페이지에서 리다이렉트되면 홈 페이지로 돌아가서 쿠키 가져오기
             current_url = page.url
-            krx_redirected = False
-
             if "MDCCOMS001" in current_url:
-                # 로그인 페이지로 리다이렉트됨 = 로그인 실패
-                logger.warning(f"로그인 실패 - 로그인 페이지로 리다이렉트됨: {current_url}")
-            else:
-                # 홈 페이지에 머물러 있음 = 로그인 성공
-                logger.info(f"KRX 직접 로그인 성공! 현재 URL: {current_url}")
-                krx_redirected = True
-
-            # 로그인 성공 확인
-            if not krx_redirected:
-                current_url = page.url
-                await self._cleanup_browser()
-                raise KRXAuthError(
-                    f"KRX 직접 로그인 실패. 아이디/비밀번호를 확인하세요.\n"
-                    f"현재 URL: {current_url[:100]}..."
-                )
+                logger.warning(f"데이터 조회 페이지에서 로그인 페이지로 리다이렉트됨. 홈 페이지로 돌아갑니다: {current_url}")
+                await page.goto(home_url, wait_until="networkidle", timeout=self.PAGE_LOAD_TIMEOUT)
+                await asyncio.sleep(2)
 
             # 쿠키 추출 및 저장 (재시도 로직 포함)
             cookies = []
