@@ -815,7 +815,7 @@ class KRXAuthManager:
             home_url = "https://data.krx.co.kr/contents/MDC/MAIN/main/index.cmd"
             logger.info(f"홈 페이지로 이동하여 로그인 상태 확인: {home_url}")
             await page.goto(home_url, wait_until="networkidle", timeout=self.PAGE_LOAD_TIMEOUT)
-            await asyncio.sleep(3)  # 쿠키 설정 대기 시간 증가
+            await asyncio.sleep(5)  # mdc.client_session 쿠키 설정 대기
 
             # 로그인 상태 확인 (로그인 페이지로 리다이렉트되면 실패)
             current_url = page.url
