@@ -778,6 +778,13 @@ class KRXAuthManager:
         page.on('dialog', lambda dialog: asyncio.create_task(handle_dialog(dialog)))
 
         try:
+            # 기존 세션 정리를 위해 먼저 로그아웃 수행
+            # (기존 세션이 있으면 새 로그인 후 mdc.client_session 쿠키가 발급되지 않음)
+            logout_url = "https://data.krx.co.kr/contents/MDC/COMS/client/MDCCOMS001D2.cmd"
+            logger.info(f"기존 세션 정리를 위해 로그아웃 수행: {logout_url}")
+            await page.goto(logout_url, wait_until="networkidle", timeout=self.PAGE_LOAD_TIMEOUT)
+            await asyncio.sleep(1)
+
             # KRX 로그인 페이지로 이동
             login_url = "https://data.krx.co.kr/contents/MDC/COMS/client/MDCCOMS001.cmd"
             await page.goto(login_url, wait_until="networkidle", timeout=self.PAGE_LOAD_TIMEOUT)
@@ -896,13 +903,18 @@ class KRXAuthManager:
                     await page.reload(wait_until="networkidle")
                     await asyncio.sleep(3)
 
-            # mdc.client_session이 없으면 경고 (API 호출 실패할 수 있음)
+            # mdc.client_session이 없으면 세션 만료로 처리하여 retry 로직이 재시도하도록 함
+            # (경고만 하고 계속 진행하면 API 호출 시 즉시 LOGOUT 발생하여 무한 재로그인 루프)
             final_cookie_names = [c["name"] for c in cookies]
             if "mdc.client_session" not in final_cookie_names:
                 logger.warning(
                     "⚠️ mdc.client_session 쿠키를 찾지 못했습니다. "
-                    "다른 위치에서 동일 계정으로 로그인된 세션이 있을 수 있습니다. "
-                    "API 호출이 실패할 수 있습니다."
+                    "KRX 서버 측 세션 충돌일 수 있습니다. 재시도합니다."
+                )
+                await self._cleanup_browser()
+                raise KRXSessionExpiredError(
+                    "mdc.client_session 쿠키를 찾지 못했습니다. "
+                    "KRX 서버 측 세션이 정리되지 않았을 수 있습니다."
                 )
 
             cookie_dict = {}
