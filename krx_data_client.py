@@ -783,7 +783,7 @@ class KRXAuthManager:
             logout_url = "https://data.krx.co.kr/contents/MDC/COMS/client/MDCCOMS001D2.cmd"
             logger.info(f"기존 세션 정리를 위해 로그아웃 수행: {logout_url}")
             await page.goto(logout_url, wait_until="networkidle", timeout=self.PAGE_LOAD_TIMEOUT)
-            await asyncio.sleep(1)
+            await asyncio.sleep(5)  # KRX 서버에서 세션 정리 시간 확보
 
             # KRX 로그인 페이지로 이동
             login_url = "https://data.krx.co.kr/contents/MDC/COMS/client/MDCCOMS001.cmd"
@@ -844,12 +844,20 @@ class KRXAuthManager:
             await page.goto(data_page_url, wait_until="networkidle", timeout=self.PAGE_LOAD_TIMEOUT)
             await asyncio.sleep(3)  # mdc.client_session 쿠키 설정 대기
 
-            # 데이터 조회 페이지에서 리다이렉트되면 홈 페이지로 돌아가서 쿠키 가져오기
+            # 데이터 조회 페이지에서 리다이렉트되면 세션이 무효화된 것임
+            # (다른 프로세스에서 로그인하여 기존 세션이 만료됨)
             current_url = page.url
             if "MDCCOMS001" in current_url:
-                logger.warning(f"데이터 조회 페이지에서 로그인 페이지로 리다이렉트됨. 홈 페이지로 돌아갑니다: {current_url}")
-                await page.goto(home_url, wait_until="networkidle", timeout=self.PAGE_LOAD_TIMEOUT)
-                await asyncio.sleep(2)
+                logger.warning(
+                    f"데이터 조회 페이지에서 로그인 페이지로 리다이렉트됨: {current_url}. "
+                    "다른 프로세스에서 로그인하여 세션이 무효화되었을 수 있습니다. "
+                    "브라우저를 재시작하고 재시도합니다."
+                )
+                await self._cleanup_browser()
+                raise KRXSessionExpiredError(
+                    "데이터 조회 페이지에서 로그인 페이지로 리다이렉트됨. "
+                    "다른 프로세스의 로그인으로 세션이 무효화되었습니다."
+                )
 
             # 쿠키 추출 및 저장 (재시도 로직 포함)
             cookies = []
