@@ -555,7 +555,7 @@ class KRXAuthManager:
                         last_error = e
                         logger.warning(f"로그인 시도 {attempt + 1}/{self.MAX_LOGIN_RETRIES} 실패: {e}")
                         if attempt < self.MAX_LOGIN_RETRIES - 1:
-                            wait_time = (attempt + 1) * 5  # 5초, 10초, 15초...
+                            wait_time = (attempt + 1) * 15  # 15초, 30초, 45초... (KRX 세션 정리 대기)
                             logger.info(f"{wait_time}초 후 재시도...")
                             time.sleep(wait_time)
                             self._cleanup_session_files()
@@ -783,7 +783,7 @@ class KRXAuthManager:
             logout_url = "https://data.krx.co.kr/contents/MDC/COMS/client/MDCCOMS001D2.cmd"
             logger.info(f"기존 세션 정리를 위해 로그아웃 수행: {logout_url}")
             await page.goto(logout_url, wait_until="networkidle", timeout=self.PAGE_LOAD_TIMEOUT)
-            await asyncio.sleep(5)  # KRX 서버에서 세션 정리 시간 확보
+            await asyncio.sleep(10)  # KRX 서버에서 세션 정리 시간 확보 (충분히 대기)
 
             # KRX 로그인 페이지로 이동
             login_url = "https://data.krx.co.kr/contents/MDC/COMS/client/MDCCOMS001.cmd"
@@ -836,6 +836,9 @@ class KRXAuthManager:
                 )
 
             logger.info(f"KRX 직접 로그인 성공! 현재 URL: {current_url}")
+
+            # 로그인 성공 후 서버 측 세션 안정화 대기
+            await asyncio.sleep(3)
 
             # 데이터 조회 페이지로 이동하여 mdc.client_session 쿠키 발급 유도
             # (mdc.client_session 쿠키는 데이터 조회 페이지에서만 발급됨)
