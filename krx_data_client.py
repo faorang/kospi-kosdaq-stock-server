@@ -37,6 +37,7 @@ import asyncio
 import functools
 import time
 import fcntl
+import random
 from datetime import datetime, timedelta, date
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Callable, TypeVar
@@ -142,7 +143,7 @@ class KRXAuthManager:
     # Playwright 타임아웃 설정 (운영 안정성을 위해 충분히 길게)
     PAGE_LOAD_TIMEOUT = 60000  # 60초
     LOGIN_WAIT_TIMEOUT = 30000  # 30초
-    MAX_LOGIN_RETRIES = 3  # 로그인 재시도 횟수
+    MAX_LOGIN_RETRIES = 5  # 로그인 재시도 횟수 (동시 로그인 경쟁 대응)
     LOCK_WAIT_TIMEOUT = 120  # 락 대기 타임아웃 (초) - 로그인에 2분 이상 걸릴 수 있음
 
     def __init__(
@@ -555,8 +556,11 @@ class KRXAuthManager:
                         last_error = e
                         logger.warning(f"로그인 시도 {attempt + 1}/{self.MAX_LOGIN_RETRIES} 실패: {e}")
                         if attempt < self.MAX_LOGIN_RETRIES - 1:
-                            wait_time = (attempt + 1) * 15  # 15초, 30초, 45초... (KRX 세션 정리 대기)
-                            logger.info(f"{wait_time}초 후 재시도...")
+                            # 기본 대기 시간 + 랜덤 jitter (동시 로그인 경쟁 방지)
+                            base_wait = (attempt + 1) * 20  # 20초, 40초, 60초, 80초...
+                            jitter = random.uniform(5, 15)  # 5~15초 랜덤 추가
+                            wait_time = base_wait + jitter
+                            logger.info(f"{wait_time:.1f}초 후 재시도... (base={base_wait}s, jitter={jitter:.1f}s)")
                             time.sleep(wait_time)
                             self._cleanup_session_files()
 
@@ -837,8 +841,10 @@ class KRXAuthManager:
 
             logger.info(f"KRX 직접 로그인 성공! 현재 URL: {current_url}")
 
-            # 로그인 성공 후 서버 측 세션 안정화 대기
-            await asyncio.sleep(3)
+            # 로그인 성공 후 서버 측 세션 안정화 대기 (동시 로그인 경쟁 방지를 위해 랜덤 jitter 추가)
+            stabilization_wait = 5 + random.uniform(2, 8)  # 7~13초 랜덤 대기
+            logger.info(f"세션 안정화 대기: {stabilization_wait:.1f}초...")
+            await asyncio.sleep(stabilization_wait)
 
             # 데이터 조회 페이지로 이동하여 mdc.client_session 쿠키 발급 유도
             # (mdc.client_session 쿠키는 데이터 조회 페이지에서만 발급됨)
