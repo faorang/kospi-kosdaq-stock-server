@@ -490,6 +490,41 @@ def get_index_ohlcv(
         return {"error": error_message}
 
 
+@mcp.tool()
+def get_sector_info(
+    market: str = "KOSPI"
+) -> Dict[str, Any]:
+    """Retrieves sector/industry classification for all stocks in a market.
+
+    Args:
+        market (str): Market to query. "KOSPI" or "KOSDAQ". Defaults to "KOSPI".
+
+    Returns:
+        Dict[str, str]: Mapping of ticker codes to sector names.
+        Example: {"005930": "전기전자", "000660": "전기전자", "005380": "운수장비"}
+    """
+    try:
+        today = datetime.now().strftime('%Y%m%d')
+
+        # 1. KRX Data Client 시도
+        client = _get_krx_client()
+        if client:
+            try:
+                result = client.get_market_sector_info(today, market=market)
+                if result:
+                    logger.info(f"KRX Data Client로 업종분류 조회 성공: {len(result)}개 종목")
+                    return result
+            except Exception as e:
+                logger.warning(f"KRX Data Client 업종분류 실패: {e}")
+
+        return {"error": f"업종분류 조회 실패. {_get_auth_error_message()}"}
+
+    except Exception as e:
+        error_message = f"Sector info retrieval failed: {str(e)}"
+        logger.error(error_message)
+        return {"error": error_message}
+
+
 # =============================================================================
 # Resources
 # =============================================================================

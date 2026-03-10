@@ -1059,6 +1059,8 @@ class KRXDataClient:
         "index_ohlcv": "dbms/MDC/STAT/standard/MDCSTAT00301",
         # 지수 검색
         "finder_index": "dbms/comm/finder/finder_equidx",
+        # 업종분류 현황
+        "sector_classification": "dbms/MDC/STAT/standard/MDCSTAT03901",
     }
 
     # 시장 코드 매핑
@@ -1893,6 +1895,49 @@ class KRXDataClient:
         available = [c for c in result_cols if c in df.columns]
 
         return df[available] if available else df
+
+    @retry_on_session_expired()
+    def get_market_sector_info(self, date: str, market: str = "KOSPI") -> Dict[str, str]:
+        """
+        전체 종목의 업종분류 정보 조회
+
+        Args:
+            date: 조회일 (YYYYMMDD)
+            market: 시장구분 ("KOSPI", "KOSDAQ")
+
+        Returns:
+            Dict[str, str]: {종목코드: 업종명} 매핑
+            Example: {"005930": "전기전자", "000660": "전기전자", "005380": "운수장비"}
+        """
+        query_date = self.get_nearest_business_day(date)
+
+        market_map = {
+            "KOSPI": "STK",
+            "KOSDAQ": "KSQ",
+        }
+        mkt_id = market_map.get(market.upper(), "STK")
+
+        items = self._request(
+            self.BLD["sector_classification"],
+            {
+                "mktId": mkt_id,
+                "trdDd": query_date,
+            },
+            output_key="block1"
+        )
+
+        if not items:
+            return {}
+
+        result = {}
+        for item in items:
+            ticker = item.get("ISU_SRT_CD", "")
+            sector = item.get("IDX_IND_NM", "")
+            if ticker and sector:
+                result[ticker] = sector
+
+        logger.info(f"업종분류 정보 조회 완료: {len(result)}개 종목 ({market})")
+        return result
 
     def get_market_ticker_list(self, date: Optional[str] = None, market: str = "KOSPI") -> List[str]:
         """
