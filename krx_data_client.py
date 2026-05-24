@@ -42,6 +42,7 @@ from datetime import datetime, timedelta, date
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Callable, TypeVar
 from dataclasses import dataclass
+from contextlib import contextmanager
 
 from holidays.countries import KR
 
@@ -107,9 +108,13 @@ def retry_on_session_expired(max_retries: int = 3, delay: float = 1.0):
                     logger.warning(f"세션 만료 (시도 {attempt + 1}/{max_retries}), 재로그인...")
                     time.sleep(delay * (attempt + 1))  # exponential backoff
                     try:
-                        # 세션 파일 삭제 후 재로그인
-                        self._auth_manager._cleanup_session_files()
-                        self._auth_manager.login(force=True)
+                        # 먼저 다른 프로세스가 갱신한 유효 세션이 파일에 저장되어 있는지 확인 (force=False)
+                        # 실패할 때만 세션 파일 삭제 후 강제 재로그인(force=True) 수행
+                        logger.info("공유 세션 파일로부터 세션 복구 시도...")
+                        if not self._auth_manager.login(force=False):
+                            logger.warning("공유 세션 파일 복구 실패. 세션 파일 삭제 후 강제 재로그인 진행...")
+                            self._auth_manager._cleanup_session_files()
+                            self._auth_manager.login(force=True)
                     except Exception as login_error:
                         logger.error(f"재로그인 실패: {login_error}")
                         if attempt == max_retries - 1:
@@ -136,6 +141,7 @@ class KRXAuthManager:
     COOKIE_PATH = Path.home() / ".krx_session.json"
     LEGACY_COOKIE_PATH = Path.home() / ".krx_cookies.json"  # 기존 쿠키 파일
     LOCK_PATH = Path.home() / ".krx_session.lock"  # 로그인 락 파일
+    SESSION_IO_LOCK_PATH = Path.home() / ".krx_session_io.lock"  # 세션 IO 락 파일
     SESSION_TIMEOUT = timedelta(hours=4)  # 세션 타임아웃 (보수적 설정)
     SESSION_REFRESH_THRESHOLD = timedelta(hours=3)  # 이 시간 이후면 선제적 갱신
     VALIDATION_SKIP_THRESHOLD = timedelta(minutes=5)  # 이 시간 내 검증됐으면 재검증 생략
@@ -217,90 +223,115 @@ class KRXAuthManager:
             })
         return self._session
 
+    @contextmanager
+    def _session_io_lock(self, shared: bool = False, timeout: float = 10.0):
+        """세션 파일 IO를 위한 파일 락 컨텍스트 매니저 (데드락 방지 독립 파일 사용)"""
+        self.SESSION_IO_LOCK_PATH.touch(exist_ok=True)
+        lock_flag = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
+        start_time = time.time()
+        lock_file = open(self.SESSION_IO_LOCK_PATH, 'w')
+        try:
+            while True:
+                try:
+                    fcntl.flock(lock_file.fileno(), lock_flag | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.time() - start_time >= timeout:
+                        raise KRXAuthError(f"세션 IO 락 획득 타임아웃 ({timeout}초)")
+                    time.sleep(0.05)
+            yield
+        finally:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            except:
+                pass
+            lock_file.close()
+
     def _load_session(self) -> bool:
         """저장된 세션 로드"""
         # 새 형식 파일 시도
-        if self.COOKIE_PATH.exists():
-            try:
-                # 파일 수정 시간도 확인 (race condition 대응)
-                file_mtime = datetime.fromtimestamp(self.COOKIE_PATH.stat().st_mtime)
-                file_is_fresh = datetime.now() - file_mtime < self.VALIDATION_SKIP_THRESHOLD
+        try:
+            with self._session_io_lock(shared=True):
+                if self.COOKIE_PATH.exists():
+                    file_mtime = datetime.fromtimestamp(self.COOKIE_PATH.stat().st_mtime)
+                    file_is_fresh = datetime.now() - file_mtime < self.VALIDATION_SKIP_THRESHOLD
 
-                data = json.loads(self.COOKIE_PATH.read_text())
-                cookies = data.get("cookies", {})
-                krx_cookies = data.get("krx_cookies", [])  # domain 포함된 쿠키 정보
-                last_login_str = data.get("last_login")
-                last_validated_str = data.get("last_validated")  # 마지막 검증 시간
+                    data = json.loads(self.COOKIE_PATH.read_text())
+                    cookies = data.get("cookies", {})
+                    krx_cookies = data.get("krx_cookies", [])  # domain 포함된 쿠키 정보
+                    last_login_str = data.get("last_login")
+                    last_validated_str = data.get("last_validated")  # 마지막 검증 시간
 
-                if cookies and last_login_str:
-                    last_login = datetime.fromisoformat(last_login_str)
+                    if cookies and last_login_str:
+                        last_login = datetime.fromisoformat(last_login_str)
 
-                    # 타임아웃 체크
-                    if datetime.now() - last_login <= self.SESSION_TIMEOUT:
-                        # 세션에 쿠키 적용
-                        if krx_cookies:
-                            # 새 형식: domain, path 포함된 쿠키 사용
-                            for cookie in krx_cookies:
-                                self.session.cookies.set(
-                                    cookie["name"],
-                                    cookie["value"],
-                                    domain=cookie.get("domain", "data.krx.co.kr"),
-                                    path=cookie.get("path", "/")
-                                )
-                            logger.debug(f"KRX 쿠키 {len(krx_cookies)}개 로드됨")
+                        # 타임아웃 체크
+                        if datetime.now() - last_login <= self.SESSION_TIMEOUT:
+                            # 세션에 쿠키 적용
+                            if krx_cookies:
+                                # 새 형식: domain, path 포함된 쿠키 사용 (빈 도메인 버그 방지)
+                                for cookie in krx_cookies:
+                                    self.session.cookies.set(
+                                        cookie["name"],
+                                        cookie["value"],
+                                        domain=cookie.get("domain") or "data.krx.co.kr",
+                                        path=cookie.get("path", "/")
+                                    )
+                                logger.debug(f"KRX 쿠키 {len(krx_cookies)}개 로드됨")
+                            else:
+                                # 기존 형식: domain 하드코딩
+                                for name, value in cookies.items():
+                                    self.session.cookies.set(
+                                        name, value,
+                                        domain="data.krx.co.kr",
+                                        path="/"
+                                    )
+
+                            self._session_info = SessionInfo(
+                                cookies=cookies,
+                                last_login=last_login
+                            )
+
+                            # 마지막 검증 시간 로드 (파일 수정 시간으로 대체 가능)
+                            if last_validated_str:
+                                self._last_validated = datetime.fromisoformat(last_validated_str)
+                            elif file_is_fresh:
+                                # last_validated 없어도 파일이 최근 수정됐으면 신뢰
+                                self._last_validated = file_mtime
+                                logger.info(f"파일 수정 시간으로 세션 신뢰: {file_mtime}")
+
+                            logger.info("저장된 세션을 로드했습니다.")
+                            return True
                         else:
-                            # 기존 형식: domain 하드코딩
-                            for name, value in cookies.items():
-                                self.session.cookies.set(
-                                    name, value,
-                                    domain="data.krx.co.kr",
-                                    path="/"
-                                )
+                            logger.info("저장된 세션이 만료되었습니다.")
+        except Exception as e:
+            logger.warning(f"세션 로드 실패: {e}")
+
+        # 기존 형식 파일 (krx_crawler_client 호환)
+        try:
+            with self._session_io_lock(shared=True):
+                if self.LEGACY_COOKIE_PATH.exists():
+                    cookies_list = json.loads(self.LEGACY_COOKIE_PATH.read_text())
+                    if isinstance(cookies_list, list) and cookies_list:
+                        cookies = {c["name"]: c["value"] for c in cookies_list}
+
+                        # 세션에 쿠키 적용 (domain 필수!)
+                        for name, value in cookies.items():
+                            self.session.cookies.set(
+                                name, value,
+                                domain="data.krx.co.kr",
+                                path="/"
+                            )
 
                         self._session_info = SessionInfo(
                             cookies=cookies,
-                            last_login=last_login
+                            last_login=datetime.now() - timedelta(hours=1)  # 1시간 전으로 설정
                         )
 
-                        # 마지막 검증 시간 로드 (파일 수정 시간으로 대체 가능)
-                        if last_validated_str:
-                            self._last_validated = datetime.fromisoformat(last_validated_str)
-                        elif file_is_fresh:
-                            # last_validated 없어도 파일이 최근 수정됐으면 신뢰
-                            self._last_validated = file_mtime
-                            logger.info(f"파일 수정 시간으로 세션 신뢰: {file_mtime}")
-
-                        logger.info("저장된 세션을 로드했습니다.")
+                        logger.info("기존 쿠키 파일을 로드했습니다.")
                         return True
-                    else:
-                        logger.info("저장된 세션이 만료되었습니다.")
-            except Exception as e:
-                logger.warning(f"세션 로드 실패: {e}")
-
-        # 기존 형식 파일 (krx_crawler_client 호환)
-        if self.LEGACY_COOKIE_PATH.exists():
-            try:
-                cookies_list = json.loads(self.LEGACY_COOKIE_PATH.read_text())
-                if isinstance(cookies_list, list) and cookies_list:
-                    cookies = {c["name"]: c["value"] for c in cookies_list}
-
-                    # 세션에 쿠키 적용 (domain 필수!)
-                    for name, value in cookies.items():
-                        self.session.cookies.set(
-                            name, value,
-                            domain="data.krx.co.kr",
-                            path="/"
-                        )
-
-                    self._session_info = SessionInfo(
-                        cookies=cookies,
-                        last_login=datetime.now() - timedelta(hours=1)  # 1시간 전으로 설정
-                    )
-
-                    logger.info("기존 쿠키 파일을 로드했습니다.")
-                    return True
-            except Exception as e:
-                logger.warning(f"기존 쿠키 로드 실패: {e}")
+        except Exception as e:
+            logger.warning(f"기존 쿠키 로드 실패: {e}")
 
         return False
 
@@ -314,7 +345,8 @@ class KRXAuthManager:
                 "last_login": now.isoformat(),
                 "last_validated": now.isoformat() if update_validated else None
             }
-            self.COOKIE_PATH.write_text(json.dumps(data, indent=2))
+            with self._session_io_lock(shared=False):
+                self.COOKIE_PATH.write_text(json.dumps(data, indent=2))
             if update_validated:
                 self._last_validated = now
             logger.info("세션을 저장했습니다.")
@@ -327,10 +359,11 @@ class KRXAuthManager:
             if not self.COOKIE_PATH.exists():
                 return
 
-            data = json.loads(self.COOKIE_PATH.read_text())
-            now = datetime.now()
-            data["last_validated"] = now.isoformat()
-            self.COOKIE_PATH.write_text(json.dumps(data, indent=2))
+            with self._session_io_lock(shared=False):
+                data = json.loads(self.COOKIE_PATH.read_text())
+                now = datetime.now()
+                data["last_validated"] = now.isoformat()
+                self.COOKIE_PATH.write_text(json.dumps(data, indent=2))
             self._last_validated = now
             logger.debug("세션 검증 시간 업데이트")
         except Exception as e:
@@ -721,15 +754,16 @@ class KRXAuthManager:
                 path = cookie.get("path", "/")
 
                 # KRX 도메인 쿠키만 저장 (카카오 쿠키는 제외)
-                if "krx.co.kr" in domain:
+                if "krx.co.kr" in domain or domain == "":
                     logger.debug(f"KRX 쿠키 발견: {name}={value[:20]}..., domain={domain}")
+                    resolved_domain = ".krx.co.kr" if domain == "" else domain
                     self.session.cookies.set(
                         name, value,
-                        domain=domain,
+                        domain=resolved_domain,
                         path=path
                     )
                     cookie_dict[name] = value
-                    krx_cookies.append({"name": name, "value": value, "domain": domain, "path": path})
+                    krx_cookies.append({"name": name, "value": value, "domain": resolved_domain, "path": path})
 
             logger.info(f"KRX 쿠키 {len(krx_cookies)}개 저장됨")
 
@@ -947,13 +981,14 @@ class KRXAuthManager:
                 # KRX 도메인 쿠키 저장 (도메인 체크 완화)
                 if "krx.co.kr" in domain or domain == "":
                     logger.debug(f"KRX 쿠키 발견: {name}={value[:20]}..., domain={domain}")
+                    resolved_domain = ".krx.co.kr" if domain == "" else domain
                     self.session.cookies.set(
                         name, value,
-                        domain=".krx.co.kr" if domain == "" else domain,
+                        domain=resolved_domain,
                         path=path
                     )
                     cookie_dict[name] = value
-                    krx_cookies.append({"name": name, "value": value, "domain": domain, "path": path})
+                    krx_cookies.append({"name": name, "value": value, "domain": resolved_domain, "path": path})
 
             cookie_names = [c["name"] for c in krx_cookies]
             logger.info(f"KRX 쿠키 {len(krx_cookies)}개 저장됨: {cookie_names}")
