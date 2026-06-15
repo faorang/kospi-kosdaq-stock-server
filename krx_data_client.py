@@ -854,6 +854,7 @@ class KRXAuthManager:
 
             # 중복 로그인 확인 창(커스텀 모달)이 뜨는지 체크
             try:
+                logger.info("중복 로그인 창 확인 중")
                 confirm_btn = await frame.wait_for_selector(
                     'button.btn-confirm, button:has-text("확인")',
                     timeout=5000
@@ -861,8 +862,10 @@ class KRXAuthManager:
                 if confirm_btn:
                     logger.info("중복 로그인 확인 창 감지: '확인' 버튼을 클릭하여 기존 세션을 로그아웃하고 새로 로그인합니다.")
                     await confirm_btn.click()
+                else:
+                    logger.info("중복 로그인 확인 창이 나타나지 않았습니다.")
             except Exception:
-                logger.debug("중복 로그인 확인 창이 나타나지 않았습니다.")
+                logger.debug("중복 로그인 확인 에러.")
 
             # 로그인 처리 대기 (3초)
             await asyncio.sleep(3)
