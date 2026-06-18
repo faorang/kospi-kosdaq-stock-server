@@ -20,7 +20,9 @@ from typing import Dict, Any, Union, Optional
 from mcp.server.fastmcp import FastMCP
 
 # Configure logging to file (STDIO 모드에서 stderr 출력 방지)
-LOG_FILE = os.path.expanduser("~/.kospi_kosdaq_mcp.log")
+LOG_DIR = os.path.join(os.getcwd(), "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_FILE = os.path.join(LOG_DIR, "kospi_kosdaq_mcp.log")
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
