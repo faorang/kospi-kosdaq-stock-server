@@ -144,7 +144,7 @@ class KRXAuthManager:
     SESSION_IO_LOCK_PATH = Path.home() / ".krx_session_io.lock"  # 세션 IO 락 파일
     SESSION_TIMEOUT = timedelta(hours=4)  # 세션 타임아웃 (보수적 설정)
     SESSION_REFRESH_THRESHOLD = timedelta(hours=3)  # 이 시간 이후면 선제적 갱신
-    VALIDATION_SKIP_THRESHOLD = timedelta(minutes=5)  # 이 시간 내 검증됐으면 재검증 생략
+    VALIDATION_SKIP_THRESHOLD = timedelta(minutes=60)  # 이 시간 내 검증됐으면 재검증 생략
 
     # Playwright 타임아웃 설정 (운영 안정성을 위해 충분히 길게)
     PAGE_LOAD_TIMEOUT = 60000  # 60초
